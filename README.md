@@ -1,8 +1,13 @@
 # monatq
 
-**Monakhov Tensor Quantiles** — approximate quantile tracking for tensors using T-Digest.
+**Monakhov Tensor Quantiles** - approximate quantile tracking for tensors using T-Digest.
 
 `monatq` maintains one T-Digest per element position across many tensor samples, enabling fast approximate quantile queries (median, percentiles, etc.) over the observed value distribution at each position. Updates are parallelised element-wise via Rayon.
+
+## Use Cases
+
+- **Model interpretability** - feed activation or weight tensors through a forward pass and query per-position quantiles to understand how individual neurons or channels behave across inputs.
+- **Quantization & pruning** - characterise the value distribution at each position to inform bit-width selection, clipping ranges, or sparsity thresholds without storing all observations in memory.
 
 ## Installation
 
@@ -36,12 +41,12 @@ let distributions = digest.analyze();
 
 ## Features
 
-- **Parallel updates** — element-wise compression runs in parallel via Rayon
-- **Custom T-Digest** — optimised SoA layout with a three-phase merge loop; no third-party digest dependency
-- **Distribution analysis** — classify each position as Normal, Uniform, Laplace, LogNormal, or Unknown
-- **Save / load** — zstd-compressed bincode snapshots via `digest.save(path)` / `TensorDigest::load(path)`
-- **Visualisation** — built-in HTTP server (`digest.visualize()`) for browser-based inspection
+- **Parallel updates** - element-wise compression runs in parallel via Rayon
+- **Custom T-Digest** - optimised implementation for the tensor case, making per-position quantile tracking practical at tensor scale
+- **Distribution analysis** - perform simple classification, categorizing each tensor position into its respective distribution type
+- **Save / load** - zstd-compressed bincode snapshots via `digest.save(path)` / `TensorDigest::load(path)`
+- **Visualisation** - built-in HTTP server (`digest.visualize()`) for browser-based inspection of a tensor
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 - see [LICENSE](LICENSE).
