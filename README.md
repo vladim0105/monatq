@@ -11,12 +11,48 @@
 
 ## Installation
 
+**Python**
+
+```bash
+pip install monatq
+```
+
+To build and install from source into the active Python environment (requires [maturin](https://github.com/PyO3/maturin)):
+
+```bash
+make install
+```
+
+**Rust**
+
 ```toml
 [dependencies]
 monatq = "0.1"
 ```
 
 ## Usage
+
+**Python**
+
+The Python bindings accept NumPy arrays and PyTorch tensors directly (float32, CPU, contiguous).
+
+```python
+from monatq import TensorDigest
+
+digest = TensorDigest(shape=[3, 4], compression=100)
+
+for tensor in my_tensors:              # torch.Tensor or np.ndarray, shape [3, 4]
+    digest.update(tensor)
+
+medians  = digest.quantile(0.5)        # list of 12 floats
+p10, p90 = digest.quantiles([0.1, 0.9])
+labels   = digest.analyze()           # e.g. ["Normal", "Uniform", ...]
+
+digest.save("checkpoint.mq")
+digest = TensorDigest.load("checkpoint.mq")
+```
+
+**Rust**
 
 ```rust
 use monatq::TensorDigest;
@@ -38,6 +74,8 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 // Classify the distribution shape at each position
 let distributions = digest.analyze();
 ```
+
+![monatq visualizer](example.png)
 
 ## Features
 

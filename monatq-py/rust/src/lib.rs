@@ -178,8 +178,8 @@ impl PyTensorDigest {
     }
 }
 
-#[pymodule]
-mod monatq_py {
+#[pymodule(name = "monatq")]
+mod _monatq {
     #[pymodule_export]
     use super::PyTensorDigest as TensorDigest;
 }
