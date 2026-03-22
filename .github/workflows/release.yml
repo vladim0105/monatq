@@ -37,6 +37,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -44,7 +47,8 @@ jobs:
           args: >-
             --release
             --out dist
-            --manifest-path monatq-py/pyproject.toml
+            --manifest-path monatq-py/rust/Cargo.toml
+            --interpreter python3.12
           manylinux: auto   # wraps Linux builds in a manylinux container automatically
           sccache: true     # caches Rust compilation across runs
       - uses: actions/upload-artifact@v4
@@ -61,7 +65,7 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist --manifest-path monatq-py/pyproject.toml
+          args: --out dist --manifest-path monatq-py/rust/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
