@@ -1,0 +1,12 @@
+[package]
+name = "monatq-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "monatq_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27.0", features = ["extension-module"] }
+monatq = { path = "../../monatq" }

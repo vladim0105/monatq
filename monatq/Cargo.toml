@@ -1,0 +1,40 @@
+[package]
+name = "monatq"
+version = "0.1.0"
+edition = "2024"
+description = "Approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates"
+license = "Apache-2.0"
+repository = "https://github.com/vladim0105/monatq"
+authors = ["Vladimir Monakhov"]
+readme = "../README.md"
+keywords = ["tensor", "quantile", "tdigest", "statistics", "distribution"]
+categories = ["science", "mathematics"]
+
+[features]
+visualize = ["dep:httparse"]
+
+[dependencies]
+httparse = { version = "1", optional = true }
+wide = "0.7"
+rayon = "1"
+strum = { version = "0.26", features = ["derive"] }
+statrs = "0.18"
+serde = { version = "1", features = ["derive"] }
+bincode2 = "2"
+zstd = "0.13"
+
+[dev-dependencies]
+divan = "0.1.21"
+clap = { version = "4", features = ["derive"] }
+
+[[example]]
+name = "visualize"
+required-features = ["visualize"]
+
+[[bench]]
+name = "tensor_digest"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false

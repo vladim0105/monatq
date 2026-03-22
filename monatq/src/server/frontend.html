@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>monatq</title>
+<style>
+:root {
+  --bg:      #0d1117;
+  --panel:   #161b22;
+  --border:  #3d444d;
+  --text:    #b0bac6;
+  --bright:  #e6edf3;
+  --dim:     #6e7681;
+  --normal:  #4d9cf8;
+  --uniform: #f5a623;
+  --laplace: #3dd68c;
+  --logn:    #c084fc;
+  --panel-h: 260px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Mono', monospace;
+  font-size: 13px;
+  overflow: hidden;
+}
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+#header {
+  display: flex; align-items: center; gap: 20px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+#logo { font-weight: 700; font-size: 13px; letter-spacing: 2px; color: var(--bright); }
+#legend { display: flex; gap: 12px; }
+.leg { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.leg-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.leg.active .leg-dot { outline: 1px solid rgba(255,255,255,0.5); }
+#global-controls { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); user-select: none; }
+.toggle input { margin: 0; accent-color: var(--normal); }
+
+#navstrip {
+  display: flex; align-items: center; gap: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+  height: 38px;
+  font-size: 12px;
+}
+.ns-sep { color: var(--border); padding: 0 10px; font-size: 14px; user-select: none; }
+.ns-label { font-size: 11px; letter-spacing: 1px; color: var(--dim); flex-shrink: 0; }
+
+#shape-item { display: flex; align-items: center; gap: 6px; padding-right: 4px; }
+
+.dim-nav { display: flex; align-items: center; gap: 6px; padding: 2px 6px; }
+
+.nav-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  width: 22px; height: 22px;
+  border-radius: 2px; cursor: pointer;
+  font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+.nav-btn:hover { color: var(--bright); border-color: var(--text); }
+
+.dim-slider-wrap { display: flex; align-items: center; flex: 1; min-width: 50px; max-width: 120px; }
+input.dim-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 3px;
+  background: var(--border);
+  border-radius: 2px; outline: none; cursor: pointer; border: none;
+}
+input.dim-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px; height: 11px;
+  background: var(--text); border-radius: 2px; cursor: pointer; border: none;
+}
+input.dim-slider::-moz-range-thumb {
+  width: 11px; height: 11px;
+  background: var(--text); border-radius: 2px; cursor: pointer; border: none;
+}
+
+.dim-idx-wrap { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+input.dim-idx {
+  background: var(--bg); border: 1px solid var(--border); color: var(--bright);
+  font-family: inherit; font-size: 12px;
+  width: 4ch; padding: 1px 3px; text-align: right;
+  -moz-appearance: textfield; border-radius: 2px; outline: none;
+}
+input.dim-idx:focus { border-color: var(--normal); }
+input.dim-idx::-webkit-inner-spin-button,
+input.dim-idx::-webkit-outer-spin-button { -webkit-appearance: none; }
+.dim-total { color: var(--dim); white-space: nowrap; }
+
+#kb-hints {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 3px;
+  font-size: 11px; color: var(--dim); user-select: none; flex-shrink: 0;
+}
+#kb-hints .hint-word { margin: 0 4px 0 2px; }
+kbd {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 2px; font-family: inherit; font-size: 11px; color: var(--dim);
+  padding: 1px 4px; min-width: 18px;
+}
+
+#status { font-size: 12px; color: var(--dim); white-space: nowrap; margin-left: 10px; flex-shrink: 0; }
+
+#bulk-actions { display: flex; align-items: center; gap: 6px; margin-left: 10px; flex-shrink: 0; }
+.bulk-btn {
+  background: none; border: 1px solid var(--border); color: var(--text);
+  font-family: inherit; font-size: 12px; padding: 3px 8px;
+  border-radius: 2px; cursor: pointer;
+}
+.bulk-btn:hover { border-color: var(--text); color: var(--bright); }
+.bulk-btn:disabled { opacity: 0.4; cursor: default; }
+
+#main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 12px; overflow: hidden; min-height: 0; }
+#gwrap { position: relative; }
+#grid-scroll { overflow: auto; border: 1px solid var(--border); flex-shrink: 0; }
+#grid { display: block; cursor: crosshair; }
+#grid.loading { opacity: 0.35; pointer-events: none; }
+
+#grid-loader {
+  position: absolute; inset: 0;
+  display: none; align-items: center; justify-content: center;
+  pointer-events: none; font-size: 12px; color: var(--dim);
+}
+#grid-loader.visible { display: flex; }
+
+#tooltip {
+  position: fixed; pointer-events: none;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  padding: 4px 8px; border-radius: 2px; font-size: 12px; white-space: nowrap;
+  display: none; z-index: 200;
+}
+
+#panel {
+  position: fixed; bottom: 0; left: 0; right: 0; overflow: hidden;
+  height: var(--panel-h);
+  background: var(--panel); border-top: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.18s ease;
+  z-index: 100;
+}
+#panel.open { transform: translateY(0); }
+#panel-hdr {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+#cell-coord { font-size: 13px; color: var(--bright); }
+#cell-dist  { font-size: 13px; font-weight: 700; }
+#panel-tools { display: flex; align-items: center; gap: 8px; }
+#zoom-range { color: var(--dim); font-size: 11px; min-width: 0; }
+#panel-stats { display: flex; gap: 16px; font-size: 12px; margin-left: auto; }
+.stat { display: flex; gap: 4px; align-items: baseline; }
+.stat-k { color: var(--dim); }
+.stat-v { color: var(--bright); }
+#panel-loader {
+  position: absolute; inset: 0;
+  display: none; align-items: center; justify-content: center;
+  background: var(--panel); z-index: 10; font-size: 12px; color: var(--dim);
+}
+#panel-loader.visible { display: flex; }
+#panel-close { cursor: pointer; font-size: 15px; color: var(--dim); padding: 0 4px; }
+#panel-close:hover { color: var(--bright); }
+#chart-wrap { flex: 1; padding: 6px 14px 10px; min-height: 0; }
+canvas#chart { width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div id="header">
+    <div id="logo">monatq</div>
+    <div id="legend">
+      <div class="leg" data-d="Normal"><div class="leg-dot" style="background:var(--normal)"></div>Normal</div>
+      <div class="leg" data-d="Uniform"><div class="leg-dot" style="background:var(--uniform)"></div>Uniform</div>
+      <div class="leg" data-d="Laplace"><div class="leg-dot" style="background:var(--laplace)"></div>Laplace</div>
+      <div class="leg" data-d="LogNormal"><div class="leg-dot" style="background:var(--logn)"></div>LogNormal</div>
+      <div class="leg" data-d="Unknown"><div class="leg-dot" style="background:#5a6473"></div>Unknown</div>
+    </div>
+    <div id="global-controls">
+      <label class="toggle"><input type="checkbox" id="exclude-zero">exclude zeros from pdfs</label>
+    </div>
+  </div>
+
+  <div id="navstrip">
+    <div id="shape-item">
+      <span class="ns-label">shape</span>
+      <span id="ib-shape">—</span>
+    </div>
+
+    <span id="batch-sep" class="ns-sep" style="display:none">│</span>
+    <div id="batch-nav" class="dim-nav" style="display:none">
+      <span class="ns-label">batch</span>
+      <button class="nav-btn" id="b-prev">◀</button>
+      <div class="dim-slider-wrap"><input type="range" class="dim-slider" id="b-slider" min="0" max="0" value="0"></div>
+      <button class="nav-btn" id="b-next">▶</button>
+      <div class="dim-idx-wrap">
+        <input type="number" class="dim-idx" id="b-idx" min="1" max="1" value="1">
+        <span class="dim-total">/ <span id="b-tot">1</span></span>
+      </div>
+    </div>
+
+    <span id="chan-sep" class="ns-sep" style="display:none">│</span>
+    <div id="chan-nav" class="dim-nav" style="display:none">
+      <span class="ns-label">chan</span>
+      <button class="nav-btn" id="c-prev">◀</button>
+      <div class="dim-slider-wrap"><input type="range" class="dim-slider" id="c-slider" min="0" max="0" value="0"></div>
+      <button class="nav-btn" id="c-next">▶</button>
+      <div class="dim-idx-wrap">
+        <input type="number" class="dim-idx" id="c-idx" min="1" max="1" value="1">
+        <span class="dim-total">/ <span id="c-tot">1</span></span>
+      </div>
+    </div>
+
+    <div id="kb-hints">
+      <span id="kb-chan-hint" style="display:none; align-items:center; gap:3px;">
+        <kbd>↑</kbd><kbd>↓</kbd><span class="hint-word">chan</span>
+      </span>
+      <span id="kb-batch-hint" style="display:none; align-items:center; gap:3px;">
+        <kbd>←</kbd><kbd>→</kbd><span class="hint-word">batch</span>
+      </span>
+    </div>
+
+    <div id="status">connecting…</div>
+    <div id="bulk-actions">
+      <button id="select-channel" class="bulk-btn">whole channel</button>
+      <button id="select-tensor" class="bulk-btn">whole tensor</button>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="gwrap">
+      <div id="grid-scroll"><canvas id="grid"></canvas></div>
+      <div id="grid-loader">loading…</div>
+    </div>
+  </div>
+
+</div>
+<div id="tooltip"></div>
+
+<div id="panel">
+  <div id="panel-loader">loading…</div>
+  <div id="panel-hdr">
+    <div id="cell-coord">CELL —</div>
+    <div id="cell-dist">—</div>
+    <div id="panel-tools">
+      <div id="zoom-range">FULL RANGE</div>
+      <button id="zoom-reset" class="bulk-btn" disabled>reset zoom</button>
+    </div>
+    <div id="panel-stats">
+      <div class="stat"><span class="stat-k">MIN</span><span class="stat-v" id="s-min">—</span></div>
+      <div class="stat"><span class="stat-k">Q25</span><span class="stat-v" id="s-q25">—</span></div>
+      <div class="stat"><span class="stat-k">Q50</span><span class="stat-v" id="s-q50">—</span></div>
+      <div class="stat"><span class="stat-k">Q75</span><span class="stat-v" id="s-q75">—</span></div>
+      <div class="stat"><span class="stat-k">MAX</span><span class="stat-v" id="s-max">—</span></div>
+      <div class="stat"><span class="stat-k">IQR</span><span class="stat-v" id="s-iqr">—</span></div>
+    </div>
+    <div id="panel-close" onclick="closePanel()">✕</div>
+  </div>
+  <div id="chart-wrap"><canvas id="chart"></canvas></div>
+</div>
+
+<script>
+'use strict';
+
+const DIST_COLOR = {
+  Normal:    [59,  130, 246],
+  Uniform:   [245, 158, 11],
+  Laplace:   [16,  185, 129],
+  LogNormal: [168, 85,  247],
+  Unknown:   [90,  100, 115],
+};
+function distHex(d) {
+  const [r,g,b] = DIST_COLOR[d] || [100,100,100];
+  return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
+}
+function distRgba(d, a) {
+  const [r,g,b] = DIST_COLOR[d] || [100,100,100];
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function showTooltip(e, text) {
+  const t = document.getElementById('tooltip');
+  t.textContent = text;
+  t.style.left = (e.clientX + 12) + 'px';
+  t.style.top  = (e.clientY - 24) + 'px';
+  t.style.display = 'block';
+}
+function hideTooltip() {
+  document.getElementById('tooltip').style.display = 'none';
+}
+
+let info = null;
+let sliceData = null;
+let state = { b: 0, c: 0 };
+let selectedLocal = [];
+let lastCellData = null;
+let panelRequest = null;
+let hoverIdx = -1;
+let cellSz = 8;
+let gridCols = 0;
+let gridRows = 0;
+let dragState = null;
+let selectionLabel = 'CELL —';
+let chartBrush = null;
+let chartLayout = null;
+let excludeZero = false;
+
+const FULL_QUANTILE_WINDOW = { q0: 0, q1: 1 };
+
+async function init() {
+  info = await fetch('/api/info').then(r => r.json());
+  document.getElementById('ib-shape').textContent = '[' + info.shape.join(' \xd7 ') + ']';
+  setupNav();
+  await loadSlice();
+}
+
+function dims() {
+  const s = info.shape, n = info.ndim;
+  if (n === 2) return { B:1,    C:1,    H:s[0],   W:s[1] };
+  if (n === 3) return { B:1,    C:s[0], H:s[1],   W:s[2] };
+  return             { B:s[0], C:s[1], H:s[n-2], W:s[n-1] };
+}
+
+function sliceOffset(b, c) {
+  const { C, H, W } = dims();
+  const n = info.ndim;
+  if (n === 2) return 0;
+  if (n === 3) return c * H * W;
+  return (b * C + c) * H * W;
+}
+
+function setupNav() {
+  const n = info.ndim;
+  const hasBatch = n >= 4;
+  const hasChan  = n >= 3;
+  const { B, C } = dims();
+
+  document.getElementById('batch-nav').style.display = hasBatch ? 'flex' : 'none';
+  document.getElementById('batch-sep').style.display = hasBatch ? '' : 'none';
+  document.getElementById('kb-batch-hint').style.display = hasBatch ? 'inline-flex' : 'none';
+  if (hasBatch) {
+    document.getElementById('b-slider').max = B - 1;
+    document.getElementById('b-idx').max = B;
+    document.getElementById('b-tot').textContent = B;
+  }
+
+  document.getElementById('chan-nav').style.display = hasChan ? 'flex' : 'none';
+  document.getElementById('chan-sep').style.display = hasChan ? '' : 'none';
+  document.getElementById('kb-chan-hint').style.display = hasChan ? 'inline-flex' : 'none';
+  if (hasChan) {
+    document.getElementById('c-slider').max = C - 1;
+    document.getElementById('c-idx').max = C;
+    document.getElementById('c-tot').textContent = C;
+  }
+
+  document.getElementById('select-channel').disabled = false;
+  document.getElementById('select-tensor').disabled = info.shape.reduce((a, d) => a * d, 1) === 0;
+}
+
+async function loadSlice() {
+  const { B, C } = dims();
+  state.b = ((state.b % B) + B) % B;
+  state.c = ((state.c % C) + C) % C;
+  selectedLocal = [];
+  dragState = null;
+  if (document.getElementById('panel').classList.contains('open')) closePanel();
+
+  const gridEl = document.getElementById('grid');
+  gridEl.classList.add('loading');
+  document.getElementById('grid-loader').classList.add('visible');
+
+  sliceData = await fetch(`/api/slice?b=${state.b}&c=${state.c}`).then(r => r.json());
+
+  gridEl.classList.remove('loading');
+  document.getElementById('grid-loader').classList.remove('visible');
+
+  if (info.ndim >= 4) {
+    document.getElementById('b-slider').value = state.b;
+    document.getElementById('b-idx').value    = state.b + 1;
+  }
+  if (info.ndim >= 3) {
+    document.getElementById('c-slider').value = state.c;
+    document.getElementById('c-idx').value    = state.c + 1;
+  }
+
+  renderGrid();
+}
+
+function renderGrid() {
+  const { rows: H, cols: W, distributions: dists } = sliceData;
+  gridRows = H; gridCols = W;
+
+  const main = document.getElementById('main');
+  const availW = main.clientWidth  - 24;
+  const availH = main.clientHeight - 24;
+  const sz = Math.max(4, Math.min(48, Math.floor(Math.min(availW / W, availH / H))));
+  cellSz = sz;
+
+  const scroll = document.getElementById('grid-scroll');
+  scroll.style.maxWidth  = availW + 'px';
+  scroll.style.maxHeight = availH + 'px';
+
+  const canvas = document.getElementById('grid');
+  canvas.width  = W * sz;
+  canvas.height = H * sz;
+  const ctx = canvas.getContext('2d');
+
+  for (let r = 0; r < H; r++) {
+    for (let c = 0; c < W; c++) {
+      const idx = r * W + c;
+      ctx.fillStyle = idx === hoverIdx ? '#ffffff22' : distHex(dists[idx]);
+      ctx.fillRect(c * sz, r * sz, sz, sz);
+      if (idx === hoverIdx) {
+        ctx.fillStyle = distHex(dists[idx]);
+        ctx.globalAlpha = 0.7;
+        ctx.fillRect(c * sz, r * sz, sz, sz);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  for (const idx of selectedLocal) {
+    const sr = Math.floor(idx / W), sc = idx % W;
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.fillRect(sc * sz, sr * sz, sz, sz);
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(sc * sz + 1, sr * sz + 1, sz - 2, sz - 2);
+  }
+
+  if (dragState && dragState.preview.length) {
+    const rect = selectionRect(dragState.anchor, dragState.current);
+    ctx.fillStyle = 'rgba(200,223,240,0.07)';
+    ctx.fillRect(rect.c0 * sz, rect.r0 * sz, (rect.c1 - rect.c0 + 1) * sz, (rect.r1 - rect.r0 + 1) * sz);
+    ctx.strokeStyle = 'rgba(200,223,240,0.6)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(rect.c0 * sz + 0.5, rect.r0 * sz + 0.5, (rect.c1 - rect.c0 + 1) * sz - 1, (rect.r1 - rect.r0 + 1) * sz - 1);
+  }
+
+  const selectedCount = selectedLocal.length;
+  document.getElementById('status').textContent =
+    selectedCount > 0
+      ? `${H}\xd7${W}  \xb7  ${H * W} elements  \xb7  ${selectedCount} selected`
+      : `${H}\xd7${W}  \xb7  ${H * W} elements`;
+}
+
+function selectionRect(a, b) {
+  const ar = Math.floor(a / gridCols), ac = a % gridCols;
+  const br = Math.floor(b / gridCols), bc = b % gridCols;
+  return { r0: Math.min(ar,br), r1: Math.max(ar,br), c0: Math.min(ac,bc), c1: Math.max(ac,bc) };
+}
+
+function rectIndices(a, b) {
+  const rect = selectionRect(a, b);
+  const out = [];
+  for (let r = rect.r0; r <= rect.r1; r++)
+    for (let c = rect.c0; c <= rect.c1; c++)
+      out.push(r * gridCols + c);
+  return out;
+}
+
+function showPanelLoading() {
+  document.getElementById('panel').classList.add('open');
+  document.getElementById('panel-loader').classList.add('visible');
+}
+function hidePanelLoading() {
+  document.getElementById('panel-loader').classList.remove('visible');
+}
+
+async function openSelection(localIndices, label = null) {
+  if (!localIndices.length) return;
+  selectedLocal = [...localIndices].sort((a, b) => a - b);
+  selectionLabel = label || (selectedLocal.length === 1
+    ? `CELL [${Math.floor(selectedLocal[0] / gridCols)}, ${selectedLocal[0] % gridCols}]`
+    : `SELECTION ${selectedLocal.length} CELLS`);
+  renderGrid();
+  showPanelLoading();
+
+  const offset = sliceOffset(state.b, state.c);
+  const globalIndices = selectedLocal.map(idx => offset + idx);
+  panelRequest = globalIndices.length === 1
+    ? { kind: 'cell', idx: globalIndices[0] }
+    : { kind: 'merge-post', indices: globalIndices };
+  await fetchPanelSelection(FULL_QUANTILE_WINDOW);
+}
+
+function showPanelData(data) {
+  hidePanelLoading();
+  lastCellData = data;
+
+  document.getElementById('cell-coord').textContent = selectionLabel;
+  const distEl = document.getElementById('cell-dist');
+  distEl.textContent = data.distribution;
+  distEl.style.color = distHex(data.distribution);
+
+  document.querySelectorAll('.leg').forEach(el =>
+    el.classList.toggle('active', el.dataset.d === data.distribution));
+
+  const fmt = v => v.toFixed(4);
+  document.getElementById('s-min').textContent = fmt(data.min);
+  document.getElementById('s-q25').textContent = fmt(data.q25);
+  document.getElementById('s-q50').textContent = fmt(data.q50);
+  document.getElementById('s-q75').textContent = fmt(data.q75);
+  document.getElementById('s-max').textContent = fmt(data.max);
+  document.getElementById('s-iqr').textContent = fmt(data.q75 - data.q25);
+  updateZoomUi(data.q0, data.q1);
+
+  document.getElementById('panel').classList.add('open');
+  requestAnimationFrame(() => requestAnimationFrame(() => drawChart(data)));
+}
+
+function closePanel() {
+  hidePanelLoading();
+  document.getElementById('panel').classList.remove('open');
+  selectedLocal = [];
+  dragState = null;
+  selectionLabel = 'CELL —';
+  lastCellData = null;
+  panelRequest = null;
+  chartBrush = null;
+  chartLayout = null;
+  document.querySelectorAll('.leg').forEach(el => el.classList.remove('active'));
+  renderGrid();
+}
+
+function updateZoomUi(q0, q1) {
+  const full = Math.abs(q0) < 1e-6 && Math.abs(q1 - 1) < 1e-6;
+  document.getElementById('zoom-range').textContent = full
+    ? 'FULL RANGE'
+    : `QUANTILES ${(q0 * 100).toFixed(1)}%-${(q1 * 100).toFixed(1)}%`;
+  document.getElementById('zoom-reset').disabled = full;
+}
+
+function quantileQuery(window) {
+  const q0 = window?.q0 ?? 0;
+  const q1 = window?.q1 ?? 1;
+  return `q0=${q0.toFixed(6)}&q1=${q1.toFixed(6)}&exclude_zero=${excludeZero ? 1 : 0}`;
+}
+
+async function fetchPanelSelection(window = FULL_QUANTILE_WINDOW) {
+  if (!panelRequest) return;
+  const query = quantileQuery(window);
+  let endpoint = '';
+  let fetchOpts;
+
+  if (panelRequest.kind === 'cell') {
+    endpoint = `/api/cell?idx=${panelRequest.idx}&${query}`;
+  } else if (panelRequest.kind === 'merge-post') {
+    endpoint = `/api/merge?${query}`;
+    fetchOpts = {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(panelRequest.indices),
+    };
+  } else if (panelRequest.kind === 'merge-get') {
+    endpoint = `/api/merge?scope=${panelRequest.scope}&b=${panelRequest.b}&c=${panelRequest.c}&${query}`;
+  } else {
+    return;
+  }
+
+  const data = await fetch(endpoint, fetchOpts).then(r => r.json());
+  showPanelData(data);
+}
+
+function derivePdf(pts) {
+  return pts.map((p, i) => {
+    if (i === 0 || i === pts.length - 1) return { x: p.x, y: 0 };
+    const dx = pts[i+1].x - pts[i-1].x;
+    const dy = pts[i+1].y - pts[i-1].y;
+    return { x: p.x, y: Math.abs(dx) > 1e-12 ? dy / dx : 0 };
+  });
+}
+
+function drawChart(data) {
+  const canvas = document.getElementById('chart');
+  const wrap   = document.getElementById('chart-wrap');
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  if (W <= 0 || H <= 0) return;
+  canvas.width = W; canvas.height = H;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const pts = data.pdf, dist = data.distribution;
+  if (!pts || pts.length < 3) return;
+
+  const empPdf = derivePdf(pts);
+  const xs = empPdf.map(p => p.x);
+  const minX = xs[0], maxX = xs[xs.length - 1];
+  const rangeX = maxX - minX || 1;
+  const maxY = Math.max(...empPdf.map(p => p.y), 1e-12);
+
+  const pad = { l: 64, r: 12, t: 10, b: 28 };
+  const cW = W - pad.l - pad.r;
+  const cH = H - pad.t - pad.b;
+  const tx = x => pad.l + ((x - minX) / rangeX) * cW;
+  const ty = y => pad.t + cH * (1 - y / maxY);
+  chartLayout = { W, H, pad, minX, maxX, rangeX, maxY, cW, cH };
+
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.l, pad.t);
+  ctx.lineTo(pad.l, pad.t + cH);
+  ctx.lineTo(pad.l + cW, pad.t + cH);
+  ctx.stroke();
+
+  ctx.fillStyle = '#6e7681';
+  ctx.font = '12px JetBrains Mono, monospace';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const yv = maxY * (1 - i / 4);
+    const cy = pad.t + cH * (i / 4);
+    ctx.fillText(yv.toFixed(yv >= 10 ? 1 : 3), pad.l - 6, cy + 4);
+    if (i > 0 && i < 4) {
+      ctx.strokeStyle = '#21262d';
+      ctx.beginPath();
+      ctx.moveTo(pad.l, cy);
+      ctx.lineTo(pad.l + cW, cy);
+      ctx.stroke();
+    }
+  }
+
+  ctx.textAlign = 'center';
+  for (let i = 0; i <= 6; i++) {
+    const xv = minX + (i / 6) * rangeX;
+    const cx = tx(xv);
+    ctx.fillText(xv.toFixed(2), cx, pad.t + cH + 18);
+    ctx.strokeStyle = '#30363d';
+    ctx.beginPath(); ctx.moveTo(cx, pad.t + cH); ctx.lineTo(cx, pad.t + cH + 4); ctx.stroke();
+  }
+  ctx.save();
+  ctx.translate(10, pad.t + cH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText('density', 0, 0);
+  ctx.restore();
+
+  function drawCurve(pdfPts, fillStyle, strokeStyle, lineWidth) {
+    if (pdfPts.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(tx(pdfPts[0].x), ty(0));
+    ctx.lineTo(tx(pdfPts[0].x), ty(pdfPts[0].y));
+    for (let i = 1; i < pdfPts.length; i++) {
+      const p0 = pdfPts[i-1], p1 = pdfPts[i];
+      const mx = (tx(p0.x) + tx(p1.x)) / 2;
+      ctx.bezierCurveTo(mx, ty(p0.y), mx, ty(p1.y), tx(p1.x), ty(p1.y));
+    }
+    ctx.lineTo(tx(pdfPts[pdfPts.length-1].x), ty(0));
+    ctx.closePath();
+    if (fillStyle)   { ctx.fillStyle = fillStyle; ctx.fill(); }
+    if (strokeStyle) { ctx.strokeStyle = strokeStyle; ctx.lineWidth = lineWidth || 1.5; ctx.stroke(); }
+  }
+
+  drawCurve(empPdf, distRgba(dist, 0.18), distHex(dist), 2);
+
+  if (chartBrush) {
+    const x0 = Math.max(pad.l, Math.min(chartBrush.startX, chartBrush.currentX));
+    const x1 = Math.min(pad.l + cW, Math.max(chartBrush.startX, chartBrush.currentX));
+    if (x1 - x0 >= 2) {
+      ctx.fillStyle = 'rgba(230,237,243,0.10)';
+      ctx.fillRect(x0, pad.t, x1 - x0, cH);
+      ctx.strokeStyle = 'rgba(230,237,243,0.65)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x0 + 0.5, pad.t + 0.5, x1 - x0 - 1, cH - 1);
+    }
+  }
+}
+
+function chartValueAtClientX(clientX, clamp = false) {
+  if (!chartLayout) return null;
+  const canvas = document.getElementById('chart');
+  const rect = canvas.getBoundingClientRect();
+  const rawX = clientX - rect.left;
+  const left = chartLayout.pad.l;
+  const right = chartLayout.pad.l + chartLayout.cW;
+  const x = clamp ? Math.max(left, Math.min(rawX, right)) : rawX;
+  if (x < left || x > right) return null;
+  return chartLayout.minX + ((x - left) / chartLayout.cW) * chartLayout.rangeX;
+}
+
+function quantileWindowForXRange(pts, x0, x1) {
+  const lo = Math.min(x0, x1);
+  const hi = Math.max(x0, x1);
+  const within = pts.filter(p => p.x >= lo && p.x <= hi);
+  if (within.length) {
+    return { q0: within[0].y, q1: within[within.length - 1].y };
+  }
+
+  let left = pts[0];
+  let right = pts[pts.length - 1];
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].x >= lo) {
+      left = pts[i - 1];
+      right = pts[i];
+      break;
+    }
+  }
+
+  const dx = right.x - left.x;
+  if (Math.abs(dx) < 1e-12) {
+    const q = Math.min(left.y, right.y);
+    return { q0: q, q1: Math.max(left.y, right.y) };
+  }
+
+  const t0 = Math.max(0, Math.min(1, (lo - left.x) / dx));
+  const t1 = Math.max(0, Math.min(1, (hi - left.x) / dx));
+  return {
+    q0: left.y + (right.y - left.y) * t0,
+    q1: left.y + (right.y - left.y) * t1,
+  };
+}
+
+async function zoomChartToBrush() {
+  if (!chartBrush || !lastCellData) return;
+  const startValue = chartValueAtClientX(chartBrush.startXClient, true);
+  const endValue = chartValueAtClientX(chartBrush.currentXClient, true);
+  chartBrush = null;
+  drawChart(lastCellData);
+  if (startValue == null || endValue == null || Math.abs(endValue - startValue) < 1e-6) return;
+
+  const next = quantileWindowForXRange(lastCellData.pdf, startValue, endValue);
+  if (next.q1 - next.q0 < 1e-4) return;
+  if (Math.abs(next.q0 - lastCellData.q0) < 1e-5 && Math.abs(next.q1 - lastCellData.q1) < 1e-5) return;
+
+  showPanelLoading();
+  await fetchPanelSelection(next);
+}
+
+// navigation
+document.getElementById('b-prev').addEventListener('click', () => { state.b--; loadSlice(); });
+document.getElementById('b-next').addEventListener('click', () => { state.b++; loadSlice(); });
+document.getElementById('c-prev').addEventListener('click', () => { state.c--; loadSlice(); });
+document.getElementById('c-next').addEventListener('click', () => { state.c++; loadSlice(); });
+
+document.getElementById('b-slider').addEventListener('input', e => { state.b = +e.target.value; loadSlice(); });
+document.getElementById('c-slider').addEventListener('input', e => { state.c = +e.target.value; loadSlice(); });
+
+function commitIdx(key, stateKey) {
+  const { B, C } = dims();
+  const max = stateKey === 'b' ? B : C;
+  const val = parseInt(document.getElementById(key).value, 10);
+  if (!isNaN(val)) { state[stateKey] = Math.max(0, Math.min(val - 1, max - 1)); loadSlice(); }
+}
+document.getElementById('b-idx').addEventListener('keydown', e => { if (e.key === 'Enter') { commitIdx('b-idx','b'); e.target.blur(); } });
+document.getElementById('b-idx').addEventListener('blur', () => commitIdx('b-idx','b'));
+document.getElementById('c-idx').addEventListener('keydown', e => { if (e.key === 'Enter') { commitIdx('c-idx','c'); e.target.blur(); } });
+document.getElementById('c-idx').addEventListener('blur', () => commitIdx('c-idx','c'));
+
+document.getElementById('select-channel').addEventListener('click', () => {
+  if (!sliceData) return;
+  selectedLocal = Array.from({ length: gridRows * gridCols }, (_, i) => i);
+  selectionLabel = `CHANNEL ${state.c + 1}${info.ndim >= 4 ? `  BATCH ${state.b + 1}` : ''}`;
+  renderGrid();
+  showPanelLoading();
+  panelRequest = { kind: 'merge-get', scope: 'channel', b: state.b, c: state.c };
+  fetchPanelSelection(FULL_QUANTILE_WINDOW);
+});
+
+document.getElementById('select-tensor').addEventListener('click', async () => {
+  if (!info) return;
+  selectedLocal = []; dragState = null;
+  renderGrid();
+  showPanelLoading();
+  selectionLabel = `TENSOR ${info.shape.reduce((a, d) => a * d, 1)} CELLS`;
+  panelRequest = { kind: 'merge-get', scope: 'tensor', b: 0, c: 0 };
+  await fetchPanelSelection(FULL_QUANTILE_WINDOW);
+});
+
+document.getElementById('zoom-reset').addEventListener('click', async () => {
+  if (!panelRequest || !lastCellData) return;
+  showPanelLoading();
+  await fetchPanelSelection(FULL_QUANTILE_WINDOW);
+});
+
+document.getElementById('exclude-zero').addEventListener('change', async e => {
+  excludeZero = e.target.checked;
+  if (!panelRequest || !lastCellData) return;
+  showPanelLoading();
+  await fetchPanelSelection({ q0: lastCellData.q0, q1: lastCellData.q1 });
+});
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && info && info.ndim >= 4) {
+    state.b += e.key === 'ArrowLeft' ? -1 : 1;
+    loadSlice(); e.preventDefault();
+  } else if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && info && info.ndim >= 3) {
+    state.c += e.key === 'ArrowUp' ? -1 : 1;
+    loadSlice(); e.preventDefault();
+  }
+});
+
+(function() {
+  const canvas = document.getElementById('grid');
+  function hitTest(e) {
+    const rect = canvas.getBoundingClientRect();
+    const c = Math.floor((e.clientX - rect.left) / cellSz);
+    const r = Math.floor((e.clientY - rect.top)  / cellSz);
+    if (r < 0 || r >= gridRows || c < 0 || c >= gridCols) return -1;
+    return r * gridCols + c;
+  }
+  canvas.addEventListener('mousemove', e => {
+    const idx = hitTest(e);
+    if (dragState) {
+      if (idx >= 0) { dragState.current = idx; dragState.preview = rectIndices(dragState.anchor, idx); renderGrid(); }
+      hideTooltip(); return;
+    }
+    if (idx !== hoverIdx) { hoverIdx = idx; renderGrid(); }
+    if (idx >= 0 && sliceData) {
+      const r = Math.floor(idx / gridCols), c = idx % gridCols;
+      showTooltip(e, `[${r},${c}] ${sliceData.distributions[idx]}`);
+    } else {
+      hideTooltip();
+    }
+  });
+  canvas.addEventListener('mouseleave', () => {
+    if (dragState) return;
+    if (hoverIdx !== -1) { hoverIdx = -1; renderGrid(); }
+    hideTooltip();
+  });
+  canvas.addEventListener('mousedown', e => {
+    const idx = hitTest(e);
+    if (idx >= 0 && sliceData) {
+      dragState = { anchor: idx, current: idx, preview: [idx] };
+      hoverIdx = -1; hideTooltip(); renderGrid(); e.preventDefault();
+    }
+  });
+  window.addEventListener('mouseup', async e => {
+    if (!dragState) return;
+    const idx = hitTest(e);
+    const preview = idx >= 0 ? rectIndices(dragState.anchor, idx) : dragState.preview;
+    dragState = null;
+    if (preview.length) await openSelection(preview);
+    else renderGrid();
+  });
+})();
+
+(function() {
+  const canvas = document.getElementById('chart');
+  canvas.addEventListener('mousedown', e => {
+    if (!lastCellData || !chartLayout) return;
+    const value = chartValueAtClientX(e.clientX);
+    if (value == null) return;
+    chartBrush = {
+      startX: e.offsetX,
+      currentX: e.offsetX,
+      startXClient: e.clientX,
+      currentXClient: e.clientX,
+    };
+    drawChart(lastCellData);
+    e.preventDefault();
+  });
+  canvas.addEventListener('mousemove', e => {
+    if (!chartBrush || !lastCellData) return;
+    chartBrush.currentX = e.offsetX;
+    chartBrush.currentXClient = e.clientX;
+    drawChart(lastCellData);
+  });
+  window.addEventListener('mouseup', async () => {
+    if (!chartBrush) return;
+    await zoomChartToBrush();
+  });
+})();
+
+window.addEventListener('resize', () => {
+  if (sliceData) renderGrid();
+  if (lastCellData && document.getElementById('panel').classList.contains('open')) drawChart(lastCellData);
+});
+
+init().catch(err => {
+  document.getElementById('status').textContent = 'error: ' + err.message;
+});
+</script>
+</body>
+</html>

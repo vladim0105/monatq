@@ -14,7 +14,7 @@ cargo fmt            # Format code
 
 ## Project Overview
 
-`monatq` (Monakhov Tensor Quantiles) is a Rust library for analysing tensors by tracking the distribution of values at each element position. The core idea is to maintain a [TDigest](https://github.com/tdunning/t-digest) per tensor element, allowing approximate quantile queries over the observed distribution at each position across many tensor samples.
+`monatq` (Monakhov Tensor Quantiles) is a Rust library for analysing tensors by tracking the distribution of values at each element position. The core idea is to maintain a [Kernel](https://github.com/tdunning/t-digest) per tensor element, allowing approximate quantile queries over the observed distribution at each position across many tensor samples.
 
 For visual analysis of results, a web-based interface is used. It must be lightweight and portable (no heavy frameworks or server dependencies).
 
