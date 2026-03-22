@@ -9,50 +9,22 @@
 - **Model interpretability** - feed activation or weight tensors through a forward pass and query per-position quantiles to understand how individual neurons or channels behave across inputs.
 - **Quantization & pruning** - characterise the value distribution at each position to inform bit-width selection, clipping ranges, or sparsity thresholds without storing all observations in memory.
 
-## Installation
+![monatq visualizer](example.png)
 
-**Python**
+## Python
 
-```bash
-pip install monatq
-```
+See [monatq-py/README.md](monatq-py/README.md) for the Python bindings, including installation and usage with NumPy and PyTorch.
 
-To build and install from source into the active Python environment (requires [maturin](https://github.com/PyO3/maturin)):
+## Rust
 
-```bash
-make install
-```
-
-**Rust**
+### Installation
 
 ```toml
 [dependencies]
 monatq = "0.1"
 ```
 
-## Usage
-
-**Python**
-
-The Python bindings accept NumPy arrays and PyTorch tensors directly (float32, CPU, contiguous).
-
-```python
-from monatq import TensorDigest
-
-digest = TensorDigest(shape=[3, 4], compression=100)
-
-for tensor in my_tensors:              # torch.Tensor or np.ndarray, shape [3, 4]
-    digest.update(tensor)
-
-medians  = digest.quantile(0.5)        # list of 12 floats
-p10, p90 = digest.quantiles([0.1, 0.9])
-labels   = digest.analyze()           # e.g. ["Normal", "Uniform", ...]
-
-digest.save("checkpoint.mq")
-digest = TensorDigest.load("checkpoint.mq")
-```
-
-**Rust**
+### Usage
 
 ```rust
 use monatq::TensorDigest;
@@ -75,13 +47,11 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 let distributions = digest.analyze();
 ```
 
-![monatq visualizer](example.png)
-
 ## Features
 
 - **Parallel updates** - element-wise compression runs in parallel via Rayon
 - **Custom T-Digest** - optimised implementation for the tensor case, making per-position quantile tracking practical at tensor scale
-- **Distribution analysis** - perform simple classification, categorizing each tensor position into its respective distribution type
+- **Distribution analysis** - classify each position as Normal, Uniform, Laplace, or LogNormal by fitting an empirical quantile profile
 - **Save / load** - zstd-compressed bincode snapshots via `digest.save(path)` / `TensorDigest::load(path)`
 - **Visualisation** - built-in HTTP server (`digest.visualize()`) for browser-based inspection of a tensor
 

@@ -4,6 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "monatq"
+description = "Approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates"
+license = "Apache-2.0"
+authors = [{ name = "Vladimir Monakhov" }]
+readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
@@ -11,3 +15,6 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/vladim0105/monatq"
