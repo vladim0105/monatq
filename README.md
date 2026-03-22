@@ -9,11 +9,11 @@
 - **Model interpretability** - feed activation or weight tensors through a forward pass and query per-position quantiles to understand how individual neurons or channels behave across inputs.
 - **Quantization & pruning** - characterise the value distribution at each position to inform bit-width selection, clipping ranges, or sparsity thresholds without storing all observations in memory.
 
-![monatq visualizer](example.png)
+![monatq visualizer](https://raw.githubusercontent.com/vladim0105/monatq/master/example.png)
 
 ## Python
 
-See [monatq-py/README.md](monatq-py/README.md) for the Python bindings, including installation and usage with NumPy and PyTorch.
+See [monatq-py/README.md](https://github.com/vladim0105/monatq/blob/master/monatq-py/README.md) for the Python bindings, including installation and usage with NumPy and PyTorch.
 
 ## Rust
 
