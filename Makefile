@@ -1,4 +1,9 @@
-.PHONY: install wheel
+.PHONY: install wheel test
+
+## Run all tests
+test:
+	cargo test
+	cd monatq-py && python -m pytest tests/
 
 ## Build and install the Python bindings into the active Python environment.
 ## Run this after any changes to the Rust source to pick up the latest version.

@@ -5,18 +5,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::distribution::Distribution;
-use crate::tensor_digest::TensorDigest;
+use crate::tensor_digest::{TensorDigest, TensorValue};
 
 static HTML: &str = include_str!("frontend.html");
 
 /// Start a blocking HTTP visualizer on `127.0.0.1:{MONATQ_PORT}` (default 7777).
 /// Calls `analyze()` internally before serving.
-pub(crate) fn serve(digest: &mut TensorDigest) -> std::io::Result<()> {
+pub(crate) fn serve<T: TensorValue>(digest: &mut TensorDigest<T>) -> std::io::Result<()> {
     let stop = AtomicBool::new(false);
     serve_until(digest, &stop)
 }
 
-pub(crate) fn serve_until(digest: &mut TensorDigest, stop: &AtomicBool) -> std::io::Result<()> {
+pub(crate) fn serve_until<T: TensorValue>(digest: &mut TensorDigest<T>, stop: &AtomicBool) -> std::io::Result<()> {
     let port = std::env::var("MONATQ_PORT").unwrap_or_else(|_| "7777".to_string());
     let addr = format!("127.0.0.1:{port}");
 
@@ -42,11 +42,11 @@ pub(crate) fn serve_until(digest: &mut TensorDigest, stop: &AtomicBool) -> std::
 
 // ── request handling ─────────────────────────────────────────────────────────
 
-fn handle(
+fn handle<T: TensorValue>(
     stream: &std::net::TcpStream,
     shape: &[usize],
     distributions: &[Distribution],
-    digest: &mut TensorDigest,
+    digest: &mut TensorDigest<T>,
 ) {
     let (method, path, query, body_bytes) = match parse_http_request(stream) {
         Some(r) => r,
@@ -260,8 +260,8 @@ fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usiz
     format!(r#"{{"rows":{h},"cols":{w},"distributions":[{list}]}}"#)
 }
 
-fn json_digest_cell(
-    digest: &TensorDigest,
+fn json_digest_cell<T: TensorValue>(
+    digest: &TensorDigest<T>,
     dist: Distribution,
     label: &str,
     q_lo: f32,
@@ -293,8 +293,8 @@ fn json_digest_cell(
     )
 }
 
-fn json_cell(
-    digest: &mut TensorDigest,
+fn json_cell<T: TensorValue>(
+    digest: &mut TensorDigest<T>,
     distributions: &[Distribution],
     idx: usize,
     q_lo: f32,
@@ -314,7 +314,7 @@ fn json_cell(
     json_digest_cell(&filtered, dist, "cell", q_lo, q_hi)
 }
 
-fn json_digest_merged(mut merged: TensorDigest, q_lo: f32, q_hi: f32, exclude_zero: bool) -> String {
+fn json_digest_merged<T: TensorValue>(mut merged: TensorDigest<T>, q_lo: f32, q_hi: f32, exclude_zero: bool) -> String {
     if exclude_zero {
         merged = merged.without_zeros();
     }

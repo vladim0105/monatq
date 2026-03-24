@@ -1,8 +1,8 @@
 use monatq::TensorDigest;
 
 /// Build a small digest with known data.
-fn make_digest() -> TensorDigest {
-    let mut td = TensorDigest::new(&[1], 100);
+fn make_digest() -> TensorDigest<f32> {
+    let mut td = TensorDigest::<f32>::new(&[1], 100);
     for i in 0..500u32 {
         td.update(&[i as f32 * 0.002]);
     }
@@ -23,7 +23,7 @@ fn roundtrip() {
     let path = std::env::temp_dir().join("monatq_roundtrip_test.bin");
     original.save(&path).expect("save failed");
 
-    let mut loaded = TensorDigest::load(&path).expect("load failed");
+    let mut loaded = TensorDigest::<f32>::load(&path).expect("load failed");
     std::fs::remove_file(&path).ok();
 
     assert_eq!(loaded.shape(), shape.as_slice(), "shape mismatch");
@@ -53,7 +53,7 @@ fn corruption_detected() {
     bytes.truncate(bytes.len() / 2);
     std::fs::write(&path, &bytes).expect("write-back failed");
 
-    let result = TensorDigest::load(&path);
+    let result = TensorDigest::<f32>::load(&path);
     std::fs::remove_file(&path).ok();
 
     assert!(result.is_err(), "expected Err for corrupted file, got Ok");
