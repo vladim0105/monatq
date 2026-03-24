@@ -4,12 +4,12 @@ use pyo3::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
     let s = obj.str()?.to_string();
     if s.contains("float32") {
-        Ok("float32".to_string())
+        Ok("float32")
     } else if s.contains("int32") {
-        Ok("int32".to_string())
+        Ok("int32")
     } else {
         Err(PyValueError::new_err(format!(
             "cannot interpret {s:?} as a dtype; supported: float32, int32"
@@ -22,6 +22,55 @@ enum Inner {
     I32(monatq::TensorDigest<i32>),
 }
 
+impl Inner {
+    fn shape(&self) -> &[usize] {
+        match self { Inner::F32(d) => d.shape(), Inner::I32(d) => d.shape() }
+    }
+    fn numel(&self) -> usize {
+        match self { Inner::F32(d) => d.numel(), Inner::I32(d) => d.numel() }
+    }
+    fn dtype(&self) -> &'static str {
+        match self { Inner::F32(_) => "float32", Inner::I32(_) => "int32" }
+    }
+    fn flush(&mut self) {
+        match self { Inner::F32(d) => d.flush(), Inner::I32(d) => d.flush() }
+    }
+    fn quantile(&mut self, q: f32) -> Vec<f32> {
+        match self { Inner::F32(d) => d.quantile(q), Inner::I32(d) => d.quantile(q) }
+    }
+    fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
+        match self { Inner::F32(d) => d.quantiles(qs), Inner::I32(d) => d.quantiles(qs) }
+    }
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+        self.flush();
+        match self { Inner::F32(d) => d.cell_quantiles(idx, qs), Inner::I32(d) => d.cell_quantiles(idx, qs) }
+    }
+    fn analyze(&mut self) -> Vec<monatq::Distribution> {
+        match self { Inner::F32(d) => d.analyze(), Inner::I32(d) => d.analyze() }
+    }
+    fn merge_cells(&mut self, indices: &[usize]) -> Self {
+        match self {
+            Inner::F32(d) => Inner::F32(d.merge_cells(indices)),
+            Inner::I32(d) => Inner::I32(d.merge_cells(indices)),
+        }
+    }
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
+        match self {
+            Inner::F32(d) => Inner::F32(d.merge_channels(channel_indices)),
+            Inner::I32(d) => Inner::I32(d.merge_channels(channel_indices)),
+        }
+    }
+    fn merge_all(&mut self) -> Self {
+        match self { Inner::F32(d) => Inner::F32(d.merge_all()), Inner::I32(d) => Inner::I32(d.merge_all()) }
+    }
+    fn save(&mut self, path: &str) -> std::io::Result<()> {
+        match self { Inner::F32(d) => d.save(path), Inner::I32(d) => d.save(path) }
+    }
+    fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
+        match self { Inner::F32(d) => d.visualize_until(stop), Inner::I32(d) => d.visualize_until(stop) }
+    }
+}
+
 #[pyclass(name = "TensorDigest")]
 struct PyTensorDigest {
     inner: Inner,
@@ -32,7 +81,7 @@ impl PyTensorDigest {
     #[new]
     #[pyo3(signature = (shape, compression, dtype = None))]
     fn new(shape: Vec<usize>, compression: usize, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let inner = match dtype.map(normalize_dtype).transpose()?.as_deref().unwrap_or("float32") {
+        let inner = match dtype.map(normalize_dtype).transpose()?.unwrap_or("float32") {
             "float32" => Inner::F32(monatq::TensorDigest::<f32>::new(&shape, compression)),
             "int32" => Inner::I32(monatq::TensorDigest::<i32>::new(&shape, compression)),
             other => unreachable!("normalize_dtype returned unexpected value: {other}"),
@@ -41,34 +90,16 @@ impl PyTensorDigest {
     }
 
     #[getter]
-    fn shape(&self) -> Vec<usize> {
-        match &self.inner {
-            Inner::F32(d) => d.shape().to_vec(),
-            Inner::I32(d) => d.shape().to_vec(),
-        }
-    }
+    fn shape(&self) -> Vec<usize> { self.inner.shape().to_vec() }
 
     #[getter]
-    fn numel(&self) -> usize {
-        match &self.inner {
-            Inner::F32(d) => d.numel(),
-            Inner::I32(d) => d.numel(),
-        }
-    }
+    fn numel(&self) -> usize { self.inner.numel() }
 
     #[getter]
-    fn dtype(&self) -> &str {
-        match &self.inner {
-            Inner::F32(_) => "float32",
-            Inner::I32(_) => "int32",
-        }
-    }
+    fn dtype(&self) -> &str { self.inner.dtype() }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let numel = match &self.inner {
-            Inner::F32(d) => d.numel(),
-            Inner::I32(d) => d.numel(),
-        };
+        let numel = self.inner.numel();
 
         // Validate a torch tensor and return (ptr, n, dtype_str), or None if not a torch tensor.
         let try_torch = |data: &Bound<'_, PyAny>| -> PyResult<Option<(usize, usize, String)>> {
@@ -167,82 +198,34 @@ impl PyTensorDigest {
         Ok(())
     }
 
-    fn flush(&mut self) {
-        match &mut self.inner {
-            Inner::F32(d) => d.flush(),
-            Inner::I32(d) => d.flush(),
-        }
-    }
+    fn flush(&mut self) { self.inner.flush() }
 
-    fn quantile(&mut self, q: f32) -> Vec<f32> {
-        match &mut self.inner {
-            Inner::F32(d) => d.quantile(q),
-            Inner::I32(d) => d.quantile(q),
-        }
-    }
+    fn quantile(&mut self, q: f32) -> Vec<f32> { self.inner.quantile(q) }
 
-    fn quantiles(&mut self, qs: Vec<f32>) -> Vec<Vec<f32>> {
-        match &mut self.inner {
-            Inner::F32(d) => d.quantiles(&qs),
-            Inner::I32(d) => d.quantiles(&qs),
-        }
-    }
+    fn quantiles(&mut self, qs: Vec<f32>) -> Vec<Vec<f32>> { self.inner.quantiles(&qs) }
 
     fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> Vec<f32> {
-        match &mut self.inner {
-            Inner::F32(d) => {
-                d.flush();
-                d.cell_quantiles(idx, &qs)
-            }
-            Inner::I32(d) => {
-                d.flush();
-                d.cell_quantiles(idx, &qs)
-            }
-        }
+        self.inner.cell_quantiles(idx, &qs)
     }
 
     fn analyze(&mut self) -> Vec<String> {
-        match &mut self.inner {
-            Inner::F32(d) => d.analyze(),
-            Inner::I32(d) => d.analyze(),
-        }
-        .iter()
-        .map(|d| d.to_string())
-        .collect()
+        self.inner.analyze().iter().map(|d| d.to_string()).collect()
     }
 
     fn merge_cells(&mut self, indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: match &mut self.inner {
-                Inner::F32(d) => Inner::F32(d.merge_cells(&indices)),
-                Inner::I32(d) => Inner::I32(d.merge_cells(&indices)),
-            },
-        }
+        PyTensorDigest { inner: self.inner.merge_cells(&indices) }
     }
 
     fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: match &mut self.inner {
-                Inner::F32(d) => Inner::F32(d.merge_channels(&channel_indices)),
-                Inner::I32(d) => Inner::I32(d.merge_channels(&channel_indices)),
-            },
-        }
+        PyTensorDigest { inner: self.inner.merge_channels(&channel_indices) }
     }
 
     fn merge_all(&mut self) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: match &mut self.inner {
-                Inner::F32(d) => Inner::F32(d.merge_all()),
-                Inner::I32(d) => Inner::I32(d.merge_all()),
-            },
-        }
+        PyTensorDigest { inner: self.inner.merge_all() }
     }
 
     fn save(&mut self, path: &str) -> PyResult<()> {
-        match &mut self.inner {
-            Inner::F32(d) => d.save(path).map_err(PyIOError::new_err),
-            Inner::I32(d) => d.save(path).map_err(PyIOError::new_err),
-        }
+        self.inner.save(path).map_err(PyIOError::new_err)
     }
 
     #[staticmethod]
@@ -258,10 +241,7 @@ impl PyTensorDigest {
 
         let result = py.detach(|| {
             std::thread::scope(|scope| -> PyResult<std::io::Result<()>> {
-                let handle = match &mut self.inner {
-                    Inner::F32(d) => scope.spawn(|| d.visualize_until(&stop)),
-                    Inner::I32(d) => scope.spawn(|| d.visualize_until(&stop)),
-                };
+                let handle = scope.spawn(|| self.inner.visualize_until(&stop));
                 loop {
                     if handle.is_finished() {
                         return Ok(handle.join().unwrap());
