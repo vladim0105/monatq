@@ -172,6 +172,20 @@ impl PyTensorDigest {
                 d.update(&vec);
             }
             Inner::I32(d) => {
+                // Buffer protocol (numpy i32 arrays)
+                if let Ok(buf) = PyBuffer::<i32>::get(data) {
+                    if buf.item_count() != numel {
+                        return Err(PyValueError::new_err(format!(
+                            "data element count {} does not match numel {}",
+                            buf.item_count(),
+                            numel,
+                        )));
+                    }
+                    let mut vec = vec![0i32; numel];
+                    buf.copy_to_slice(py, &mut vec)?;
+                    d.update(&vec);
+                    return Ok(());
+                }
                 // Torch tensor fast path
                 if let Some((ptr, n, dtype_str)) = try_torch(data)? {
                     if !dtype_str.contains("int32") {
