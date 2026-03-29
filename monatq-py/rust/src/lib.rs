@@ -17,9 +17,101 @@ fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
     }
 }
 
+/// Probe `data` for a torch tensor. Returns `(data_ptr, numel, dtype_str)` on success,
+/// `None` if `data` is not a torch tensor, or an error for invalid torch tensors.
+fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, usize, String)>> {
+    let Ok(ptr_obj) = data.call_method0("data_ptr") else {
+        return Ok(None);
+    };
+    let Ok(ptr) = ptr_obj.extract::<usize>() else {
+        return Ok(None);
+    };
+    let dtype_str = data.getattr("dtype")?.str()?.to_string();
+    let device_type = data
+        .getattr("device")?
+        .getattr("type")?
+        .extract::<String>()?;
+    if device_type != "cpu" {
+        return Err(PyValueError::new_err(
+            "torch tensor must be on CPU; call .cpu() first",
+        ));
+    }
+    if !data.call_method0("is_contiguous")?.extract::<bool>()? {
+        return Err(PyValueError::new_err(
+            "torch tensor must be contiguous; call .contiguous() first",
+        ));
+    }
+    let n = data.call_method0("numel")?.extract::<usize>()?;
+    if n != numel {
+        return Err(PyValueError::new_err(format!(
+            "data element count {n} does not match numel {numel}"
+        )));
+    }
+    Ok(Some((ptr, n, dtype_str)))
+}
+
+/// Common input handling for all element types:
+/// buffer protocol (numpy) → torch fast path → Python list fallback.
+fn update_typed<T>(
+    py: Python<'_>,
+    d: &mut monatq::TensorDigest<T>,
+    data: &Bound<'_, PyAny>,
+    numel: usize,
+    dtype_name: &'static str,
+) -> PyResult<()>
+where
+    T: monatq::TensorValue + pyo3::buffer::Element + for<'a, 'py> FromPyObject<'a, 'py> + Default,
+{
+    // Buffer protocol (numpy arrays)
+    if let Ok(buf) = PyBuffer::<T>::get(data) {
+        if buf.item_count() != numel {
+            return Err(PyValueError::new_err(format!(
+                "data element count {} does not match numel {}",
+                buf.item_count(),
+                numel,
+            )));
+        }
+        let mut vec = vec![T::default(); numel];
+        buf.copy_to_slice(py, &mut vec)?;
+        d.update(&vec);
+        return Ok(());
+    }
+    // Torch tensor fast path
+    if let Some((ptr, n, dtype_str)) = try_torch(data, numel)? {
+        if !dtype_str.contains(dtype_name) {
+            return Err(PyValueError::new_err(format!(
+                "this digest uses dtype {dtype_name} but tensor dtype is {dtype_str}"
+            )));
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, n) };
+        d.update(slice);
+        return Ok(());
+    }
+    // Python list fallback
+    let vec = data.extract::<Vec<T>>()?;
+    if vec.len() != numel {
+        return Err(PyValueError::new_err(format!(
+            "data length {} does not match numel {}",
+            vec.len(),
+            numel,
+        )));
+    }
+    d.update(&vec);
+    Ok(())
+}
+
 enum Inner {
     F32(monatq::TensorDigest<f32>),
     I32(monatq::TensorDigest<i32>),
+}
+
+impl From<monatq::AnyTensorDigest> for Inner {
+    fn from(any: monatq::AnyTensorDigest) -> Self {
+        match any {
+            monatq::AnyTensorDigest::F32(d) => Inner::F32(d),
+            monatq::AnyTensorDigest::I32(d) => Inner::I32(d),
+        }
+    }
 }
 
 impl Inner {
@@ -31,6 +123,14 @@ impl Inner {
     }
     fn dtype(&self) -> &'static str {
         match self { Inner::F32(_) => "float32", Inner::I32(_) => "int32" }
+    }
+    fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        let numel = self.numel();
+        let dtype = self.dtype();
+        match self {
+            Inner::F32(d) => update_typed(py, d, data, numel, dtype),
+            Inner::I32(d) => update_typed(py, d, data, numel, dtype),
+        }
     }
     fn flush(&mut self) {
         match self { Inner::F32(d) => d.flush(), Inner::I32(d) => d.flush() }
@@ -99,117 +199,7 @@ impl PyTensorDigest {
     fn dtype(&self) -> &str { self.inner.dtype() }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let numel = self.inner.numel();
-
-        // Validate a torch tensor and return (ptr, n, dtype_str), or None if not a torch tensor.
-        let try_torch = |data: &Bound<'_, PyAny>| -> PyResult<Option<(usize, usize, String)>> {
-            let Ok(ptr_obj) = data.call_method0("data_ptr") else {
-                return Ok(None);
-            };
-            let Ok(ptr) = ptr_obj.extract::<usize>() else {
-                return Ok(None);
-            };
-            let dtype_str = data.getattr("dtype")?.str()?.to_string();
-            let device_type = data
-                .getattr("device")?
-                .getattr("type")?
-                .extract::<String>()?;
-            if device_type != "cpu" {
-                return Err(PyValueError::new_err(
-                    "torch tensor must be on CPU; call .cpu() first",
-                ));
-            }
-            if !data.call_method0("is_contiguous")?.extract::<bool>()? {
-                return Err(PyValueError::new_err(
-                    "torch tensor must be contiguous; call .contiguous() first",
-                ));
-            }
-            let n = data.call_method0("numel")?.extract::<usize>()?;
-            if n != numel {
-                return Err(PyValueError::new_err(format!(
-                    "data element count {n} does not match numel {numel}"
-                )));
-            }
-            Ok(Some((ptr, n, dtype_str)))
-        };
-
-        match &mut self.inner {
-            Inner::F32(d) => {
-                // Buffer protocol (numpy f32 arrays)
-                if let Ok(buf) = PyBuffer::<f32>::get(data) {
-                    if buf.item_count() != numel {
-                        return Err(PyValueError::new_err(format!(
-                            "data element count {} does not match numel {}",
-                            buf.item_count(),
-                            numel,
-                        )));
-                    }
-                    let mut vec = vec![0.0f32; numel];
-                    buf.copy_to_slice(py, &mut vec)?;
-                    d.update(&vec);
-                    return Ok(());
-                }
-                // Torch tensor fast path
-                if let Some((ptr, n, dtype_str)) = try_torch(data)? {
-                    if !dtype_str.contains("float32") {
-                        return Err(PyValueError::new_err(format!(
-                            "this digest uses dtype float32 but tensor dtype is {dtype_str}"
-                        )));
-                    }
-                    let slice = unsafe { std::slice::from_raw_parts(ptr as *const f32, n) };
-                    d.update(slice);
-                    return Ok(());
-                }
-                // Python list fallback
-                let vec = data.extract::<Vec<f32>>()?;
-                if vec.len() != numel {
-                    return Err(PyValueError::new_err(format!(
-                        "data length {} does not match numel {}",
-                        vec.len(),
-                        numel,
-                    )));
-                }
-                d.update(&vec);
-            }
-            Inner::I32(d) => {
-                // Buffer protocol (numpy i32 arrays)
-                if let Ok(buf) = PyBuffer::<i32>::get(data) {
-                    if buf.item_count() != numel {
-                        return Err(PyValueError::new_err(format!(
-                            "data element count {} does not match numel {}",
-                            buf.item_count(),
-                            numel,
-                        )));
-                    }
-                    let mut vec = vec![0i32; numel];
-                    buf.copy_to_slice(py, &mut vec)?;
-                    d.update(&vec);
-                    return Ok(());
-                }
-                // Torch tensor fast path
-                if let Some((ptr, n, dtype_str)) = try_torch(data)? {
-                    if !dtype_str.contains("int32") {
-                        return Err(PyValueError::new_err(format!(
-                            "this digest uses dtype int32 but tensor dtype is {dtype_str}"
-                        )));
-                    }
-                    let slice = unsafe { std::slice::from_raw_parts(ptr as *const i32, n) };
-                    d.update(slice);
-                    return Ok(());
-                }
-                // Python list fallback
-                let vec = data.extract::<Vec<i32>>()?;
-                if vec.len() != numel {
-                    return Err(PyValueError::new_err(format!(
-                        "data length {} does not match numel {}",
-                        vec.len(),
-                        numel,
-                    )));
-                }
-                d.update(&vec);
-            }
-        }
-        Ok(())
+        self.inner.update(py, data)
     }
 
     fn flush(&mut self) { self.inner.flush() }
@@ -244,10 +234,8 @@ impl PyTensorDigest {
 
     #[staticmethod]
     fn load(path: &str) -> PyResult<PyTensorDigest> {
-        match monatq::load(path).map_err(PyIOError::new_err)? {
-            monatq::AnyTensorDigest::F32(d) => Ok(PyTensorDigest { inner: Inner::F32(d) }),
-            monatq::AnyTensorDigest::I32(d) => Ok(PyTensorDigest { inner: Inner::I32(d) }),
-        }
+        let inner = monatq::load(path).map_err(PyIOError::new_err)?.into();
+        Ok(PyTensorDigest { inner })
     }
 
     fn visualize(&mut self, py: Python<'_>) -> PyResult<()> {

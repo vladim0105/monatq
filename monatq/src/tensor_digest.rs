@@ -207,18 +207,7 @@ impl<T: TensorValue> TensorDigest<T> {
     /// Compute a single quantile at every position. Returns a flat row-major `Vec<f32>`.
     pub fn quantile(&mut self, q: f32) -> Vec<f32> {
         self.flush();
-        let max_centroids = self.max_centroids;
-        self.centroids_means
-            .par_chunks(max_centroids)
-            .zip(self.centroids_weights.par_chunks(max_centroids))
-            .zip(self.n_centroids.par_iter())
-            .zip(self.total_weights.par_iter())
-            .zip(self.mins.par_iter())
-            .zip(self.maxs.par_iter())
-            .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32(), q)
-            })
-            .collect()
+        self.quantile_no_flush(q)
     }
 
     /// Compute multiple quantiles at every position.
@@ -284,12 +273,8 @@ impl<T: TensorValue> TensorDigest<T> {
                     self.centroids_weights[start + i],
                 ));
             }
-            if self.mins[idx] < merged.mins[0] {
-                merged.mins[0] = self.mins[idx];
-            }
-            if self.maxs[idx] > merged.maxs[0] {
-                merged.maxs[0] = self.maxs[idx];
-            }
+            update_min(&mut merged.mins[0], self.mins[idx]);
+            update_max(&mut merged.maxs[0], self.maxs[idx]);
         }
 
         all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -330,12 +315,8 @@ impl<T: TensorValue> TensorDigest<T> {
             for i in 0..nc {
                 all.push((ch_digest.centroids_means[i], ch_digest.centroids_weights[i]));
             }
-            if ch_digest.mins[0] < min {
-                min = ch_digest.mins[0];
-            }
-            if ch_digest.maxs[0] > max {
-                max = ch_digest.maxs[0];
-            }
+            update_min(&mut min, ch_digest.mins[0]);
+            update_max(&mut max, ch_digest.maxs[0]);
         }
 
         let mut merged = TensorDigest::new(&[1], self.compression);
@@ -550,6 +531,16 @@ fn analyze_element(
     } else {
         best
     }
+}
+
+#[inline]
+fn update_min<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate < *current { *current = candidate; }
+}
+
+#[inline]
+fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate > *current { *current = candidate; }
 }
 
 /// Merge sorted `incoming` into the centroid arrays for one element.
