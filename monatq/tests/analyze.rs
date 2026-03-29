@@ -1,8 +1,8 @@
 use monatq::{Distribution, TensorDigest};
 use statrs::distribution::{ContinuousCDF, LogNormal, Normal, Uniform};
 
-fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest {
-    let mut td = TensorDigest::new(&[1], 100);
+fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32> {
+    let mut td = TensorDigest::<f32>::new(&[1], 100);
     for v in values {
         td.update(&[v]);
     }
