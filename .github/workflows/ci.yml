@@ -26,5 +26,5 @@ jobs:
           python-version: '3.12'
       - run: pip install maturin pytest numpy
       - run: pip install "torch==2.7.0" --index-url https://download.pytorch.org/whl/cpu
-      - run: cd monatq-py && maturin develop --release
+      - run: pip install -e monatq-py/ --no-build-isolation
       - run: cd monatq-py && python -m pytest tests/
