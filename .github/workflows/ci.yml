@@ -7,6 +7,34 @@ on:
     branches: [master]
 
 jobs:
+  version-bump:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check versions are incremented
+        run: |
+          check_version() {
+            local toml="$1"
+            local pr_ver
+            local base_ver
+            pr_ver=$(grep '^version' "$toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+            base_ver=$(git show "origin/${{ github.base_ref }}:$toml" | grep '^version' | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+            echo "$toml: base=$base_ver pr=$pr_ver"
+            if [ "$(printf '%s\n' "$base_ver" "$pr_ver" | sort -V | head -1)" = "$pr_ver" ] && [ "$pr_ver" != "$base_ver" ]; then
+              echo "ERROR: version in $toml ($pr_ver) must be greater than base ($base_ver)"
+              return 1
+            fi
+            if [ "$pr_ver" = "$base_ver" ]; then
+              echo "ERROR: version in $toml ($pr_ver) was not incremented"
+              return 1
+            fi
+          }
+          check_version monatq/Cargo.toml
+          check_version monatq-py/rust/Cargo.toml
+
   rust:
     runs-on: ubuntu-latest
     steps:
