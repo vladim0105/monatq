@@ -6,18 +6,67 @@ use wide::f32x8;
 
 use crate::distribution::{Distribution, N_PADDED, probe_points, ref_profiles};
 
+/// Trait for types that can be stored in a `TensorDigest`.
+///
+/// T-Digest centroids and weights always stay `f32` (algorithm requirement).
+/// This trait provides the conversion needed when incoming values are consumed
+/// during `compress()`.
+pub trait TensorValue: Copy + Send + Sync + 'static + PartialOrd {
+    /// One-byte tag stored as the first field of every saved `TensorDigest` file.
+    const DTYPE_TAG: u8;
+    /// Convert this value to `f32` for use in centroid arithmetic.
+    fn to_f32(self) -> f32;
+    /// Construct a value from its `f32` representation (used for centroid-derived bounds).
+    fn from_f32(f: f32) -> Self;
+    /// Returns `true` if this value is considered non-zero.
+    fn is_nonzero(self) -> bool;
+    /// Sentinel used to initialise minimum trackers (should be the type's maximum value).
+    fn min_sentinel() -> Self;
+    /// Sentinel used to initialise maximum trackers (should be the type's minimum value).
+    fn max_sentinel() -> Self;
+}
+
+impl TensorValue for f32 {
+    const DTYPE_TAG: u8 = 0;
+    #[inline(always)]
+    fn to_f32(self) -> f32 { self }
+    #[inline(always)]
+    fn from_f32(f: f32) -> Self { f }
+    #[inline(always)]
+    fn is_nonzero(self) -> bool { self.abs() > 1e-12 }
+    fn min_sentinel() -> Self { f32::INFINITY }
+    fn max_sentinel() -> Self { f32::NEG_INFINITY }
+}
+
+impl TensorValue for i32 {
+    const DTYPE_TAG: u8 = 1;
+    #[inline(always)]
+    fn to_f32(self) -> f32 { self as f32 }
+    #[inline(always)]
+    fn from_f32(f: f32) -> Self { f as i32 }
+    #[inline(always)]
+    fn is_nonzero(self) -> bool { self != 0 }
+    fn min_sentinel() -> Self { i32::MAX }
+    fn max_sentinel() -> Self { i32::MIN }
+}
+
 /// Flat-array TensorDigest.
 ///
 /// All centroid storage lives in contiguous arrays owned by this struct.
 /// Element `e` occupies `centroids_*[e * max_centroids .. e * max_centroids + n_centroids[e]]`.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct TensorDigest {
+#[serde(bound(
+    serialize = "T: serde::Serialize",
+    deserialize = "T: serde::de::DeserializeOwned"
+))]
+pub struct TensorDigest<T: TensorValue> {
+    dtype_tag: u8,
     shape: Vec<usize>,
     numel: usize,
     compression: usize,
 
     // Row-major input buffer: sample s, element i → row_buffer[s * numel + i].
-    row_buffer: Vec<f32>,
+    row_buffer: Vec<T>,
     buffer_capacity: usize,
     n_buffered: usize,
 
@@ -27,11 +76,11 @@ pub struct TensorDigest {
     centroids_weights: Vec<f32>,
     n_centroids: Vec<usize>,
     total_weights: Vec<f32>,
-    mins: Vec<f32>,
-    maxs: Vec<f32>,
+    mins: Vec<T>,
+    maxs: Vec<T>,
 }
 
-impl TensorDigest {
+impl<T: TensorValue> TensorDigest<T> {
     /// Create a new digest for tensors of the given `shape` (row-major).
     ///
     /// `compression` controls the T-Digest accuracy/memory trade-off: higher values
@@ -44,10 +93,11 @@ impl TensorDigest {
         let max_centroids = 6 * compression + 10;
 
         Self {
+            dtype_tag: T::DTYPE_TAG,
             shape: shape.to_vec(),
             numel,
             compression,
-            row_buffer: vec![0.0f32; numel * buffer_capacity],
+            row_buffer: vec![T::min_sentinel(); numel * buffer_capacity],
             buffer_capacity,
             n_buffered: 0,
             max_centroids,
@@ -55,8 +105,8 @@ impl TensorDigest {
             centroids_weights: vec![0.0f32; numel * max_centroids],
             n_centroids: vec![0usize; numel],
             total_weights: vec![0.0f32; numel],
-            mins: vec![f32::INFINITY; numel],
-            maxs: vec![f32::NEG_INFINITY; numel],
+            mins: vec![T::min_sentinel(); numel],
+            maxs: vec![T::max_sentinel(); numel],
         }
     }
 
@@ -76,7 +126,7 @@ impl TensorDigest {
     }
 
     /// Add one tensor sample. `data` must be row-major with `len == numel()`.
-    pub fn update(&mut self, data: &[f32]) {
+    pub fn update(&mut self, data: &[T]) {
         assert_eq!(
             data.len(),
             self.numel,
@@ -122,19 +172,23 @@ impl TensorDigest {
             .enumerate()
             .for_each_init(
                 || Vec::with_capacity(n),
-                |new_values, (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
+                |new_values: &mut Vec<T>, (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
                     // Reuse one scratch vector per worker to avoid per-element allocation churn.
                     new_values.clear();
                     new_values.extend((0..n).map(|s| row_buffer[s * numel + e]));
-                    new_values.sort_unstable_by(f32::total_cmp);
+                    new_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
                     if let Some(&batch_min) = new_values.first() {
-                        *e_min = (*e_min).min(batch_min);
+                        if batch_min < *e_min {
+                            *e_min = batch_min;
+                        }
                     }
                     if let Some(&batch_max) = new_values.last() {
-                        *e_max = (*e_max).max(batch_max);
+                        if batch_max > *e_max {
+                            *e_max = batch_max;
+                        }
                     }
 
-                    compress::<true>(
+                    compress::<true, T>(
                         e_means,
                         e_weights,
                         e_nc,
@@ -153,18 +207,7 @@ impl TensorDigest {
     /// Compute a single quantile at every position. Returns a flat row-major `Vec<f32>`.
     pub fn quantile(&mut self, q: f32) -> Vec<f32> {
         self.flush();
-        let max_centroids = self.max_centroids;
-        self.centroids_means
-            .par_chunks(max_centroids)
-            .zip(self.centroids_weights.par_chunks(max_centroids))
-            .zip(self.n_centroids.par_iter())
-            .zip(self.total_weights.par_iter())
-            .zip(self.mins.par_iter())
-            .zip(self.maxs.par_iter())
-            .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v, max_v, q)
-            })
-            .collect()
+        self.quantile_no_flush(q)
     }
 
     /// Compute multiple quantiles at every position.
@@ -185,7 +228,7 @@ impl TensorDigest {
             .zip(self.mins.par_iter())
             .zip(self.maxs.par_iter())
             .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                analyze_element(&means[..nc], &weights[..nc], tw, min_v, max_v)
+                analyze_element(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32())
             })
             .collect()
     }
@@ -198,8 +241,8 @@ impl TensorDigest {
         let tw = self.total_weights[idx];
         let means = &self.centroids_means[start..start + nc];
         let weights = &self.centroids_weights[start..start + nc];
-        let min_v = self.mins[idx];
-        let max_v = self.maxs[idx];
+        let min_v = self.mins[idx].to_f32();
+        let max_v = self.maxs[idx].to_f32();
         qs.iter()
             .map(|&q| quantile_from_centroids(means, weights, tw, min_v, max_v, q))
             .collect()
@@ -230,14 +273,14 @@ impl TensorDigest {
                     self.centroids_weights[start + i],
                 ));
             }
-            merged.mins[0] = merged.mins[0].min(self.mins[idx]);
-            merged.maxs[0] = merged.maxs[0].max(self.maxs[idx]);
+            update_min(&mut merged.mins[0], self.mins[idx]);
+            update_max(&mut merged.maxs[0], self.maxs[idx]);
         }
 
         all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let (all_means, all_weights): (Vec<f32>, Vec<f32>) = all.into_iter().unzip();
 
-        compress::<false>(
+        compress::<false, f32>(
             &mut merged.centroids_means[..merged.max_centroids],
             &mut merged.centroids_weights[..merged.max_centroids],
             &mut merged.n_centroids[0],
@@ -263,8 +306,8 @@ impl TensorDigest {
         // Phase 1: merge each channel's cells independently via merge_cells.
         // Phase 2: collect the compressed per-channel centroids and do one final compress.
         let mut all: Vec<(f32, f32)> = Vec::new();
-        let mut min = f32::INFINITY;
-        let mut max = f32::NEG_INFINITY;
+        let mut min = T::min_sentinel();
+        let mut max = T::max_sentinel();
 
         for &ch in channel_indices {
             let ch_digest = self.merge_cells(&(ch * hw..(ch + 1) * hw).collect::<Vec<_>>());
@@ -272,8 +315,8 @@ impl TensorDigest {
             for i in 0..nc {
                 all.push((ch_digest.centroids_means[i], ch_digest.centroids_weights[i]));
             }
-            min = min.min(ch_digest.mins[0]);
-            max = max.max(ch_digest.maxs[0]);
+            update_min(&mut min, ch_digest.mins[0]);
+            update_max(&mut max, ch_digest.maxs[0]);
         }
 
         let mut merged = TensorDigest::new(&[1], self.compression);
@@ -285,7 +328,7 @@ impl TensorDigest {
         all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
         let (all_means, all_weights): (Vec<f32>, Vec<f32>) = all.into_iter().unzip();
 
-        compress::<false>(
+        compress::<false, f32>(
             &mut merged.centroids_means[..merged.max_centroids],
             &mut merged.centroids_weights[..merged.max_centroids],
             &mut merged.n_centroids[0],
@@ -303,6 +346,82 @@ impl TensorDigest {
         self.flush();
         let n_channels = self.numel / self.spatial_size();
         self.merge_channels(&(0..n_channels).collect::<Vec<_>>())
+    }
+
+    /// Flush pending data and write a zstd-compressed bincode snapshot to `path`.
+    pub fn save(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()>
+    where
+        T: serde::Serialize,
+    {
+        self.flush();
+        let bytes = bincode2::serialize(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let compressed = zstd::encode_all(bytes.as_slice(), 3).map_err(std::io::Error::other)?;
+        std::fs::write(path, compressed)
+    }
+
+    /// Load and decompress a snapshot written by `save`.
+    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let compressed = std::fs::read(path)?;
+        let bytes = zstd::decode_all(compressed.as_slice())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let loaded: Self = bincode2::deserialize(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if loaded.dtype_tag != T::DTYPE_TAG {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "dtype mismatch: file contains tag {} but expected {}",
+                    loaded.dtype_tag,
+                    T::DTYPE_TAG
+                ),
+            ));
+        }
+        Ok(loaded)
+    }
+
+    /// Number of spatial elements per channel (product of the last two shape dims, or `numel`
+    /// for tensors with fewer than two dimensions).
+    fn spatial_size(&self) -> usize {
+        let ndim = self.shape.len();
+        if ndim < 2 {
+            self.numel
+        } else {
+            self.shape[ndim - 2] * self.shape[ndim - 1]
+        }
+    }
+
+    fn quantile_no_flush(&self, q: f32) -> Vec<f32> {
+        let max_centroids = self.max_centroids;
+        self.centroids_means
+            .par_chunks(max_centroids)
+            .zip(self.centroids_weights.par_chunks(max_centroids))
+            .zip(self.n_centroids.par_iter())
+            .zip(self.total_weights.par_iter())
+            .zip(self.mins.par_iter())
+            .zip(self.maxs.par_iter())
+            .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
+                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32(), q)
+            })
+            .collect()
+    }
+}
+
+impl<T: TensorValue> TensorDigest<T> {
+    /// Launch a blocking HTTP visualizer server.
+    /// Default port: 7777. Override with the `MONATQ_PORT` environment variable.
+    #[cfg(feature = "visualize")]
+    pub fn visualize(&mut self) -> std::io::Result<()> {
+        crate::server::serve(self)
+    }
+
+    /// Launch a blocking HTTP visualizer server that exits when `stop` is set.
+    #[cfg(feature = "visualize")]
+    pub fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
+        crate::server::serve_until(self, stop)
     }
 
     /// Return a copy with centroids centered at zero removed.
@@ -340,81 +459,24 @@ impl TensorDigest {
             filtered.n_centroids[e] = out_nc;
             filtered.total_weights[e] = out_tw;
             if out_nc == 0 {
-                filtered.mins[e] = 0.0;
-                filtered.maxs[e] = 0.0;
+                filtered.mins[e] = T::from_f32(0.0);
+                filtered.maxs[e] = T::from_f32(0.0);
                 continue;
             }
 
-            filtered.mins[e] = if self.mins[e].abs() > eps {
+            filtered.mins[e] = if self.mins[e].is_nonzero() {
                 self.mins[e]
             } else {
-                out_min
+                T::from_f32(out_min)
             };
-            filtered.maxs[e] = if self.maxs[e].abs() > eps {
+            filtered.maxs[e] = if self.maxs[e].is_nonzero() {
                 self.maxs[e]
             } else {
-                out_max
+                T::from_f32(out_max)
             };
         }
 
         filtered
-    }
-
-    /// Flush pending data and write a zstd-compressed bincode snapshot to `path`.
-    pub fn save(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-        self.flush();
-        let bytes = bincode2::serialize(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let compressed = zstd::encode_all(bytes.as_slice(), 3).map_err(std::io::Error::other)?;
-        std::fs::write(path, compressed)
-    }
-
-    /// Load and decompress a snapshot written by `save`.
-    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
-        let compressed = std::fs::read(path)?;
-        let bytes = zstd::decode_all(compressed.as_slice())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        bincode2::deserialize(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-    }
-
-    /// Launch a blocking HTTP visualizer server.
-    /// Default port: 7777. Override with the `MONATQ_PORT` environment variable.
-    #[cfg(feature = "visualize")]
-    pub fn visualize(&mut self) -> std::io::Result<()> {
-        crate::server::serve(self)
-    }
-
-    /// Launch a blocking HTTP visualizer server that exits when `stop` is set.
-    #[cfg(feature = "visualize")]
-    pub fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
-        crate::server::serve_until(self, stop)
-    }
-
-    /// Number of spatial elements per channel (product of the last two shape dims, or `numel`
-    /// for tensors with fewer than two dimensions).
-    fn spatial_size(&self) -> usize {
-        let ndim = self.shape.len();
-        if ndim < 2 {
-            self.numel
-        } else {
-            self.shape[ndim - 2] * self.shape[ndim - 1]
-        }
-    }
-
-    fn quantile_no_flush(&self, q: f32) -> Vec<f32> {
-        let max_centroids = self.max_centroids;
-        self.centroids_means
-            .par_chunks(max_centroids)
-            .zip(self.centroids_weights.par_chunks(max_centroids))
-            .zip(self.n_centroids.par_iter())
-            .zip(self.total_weights.par_iter())
-            .zip(self.mins.par_iter())
-            .zip(self.maxs.par_iter())
-            .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v, max_v, q)
-            })
-            .collect()
     }
 }
 
@@ -471,29 +533,39 @@ fn analyze_element(
     }
 }
 
-/// Merge sorted `incoming_means` into the centroid arrays for one element.
+#[inline]
+fn update_min<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate < *current { *current = candidate; }
+}
+
+#[inline]
+fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate > *current { *current = candidate; }
+}
+
+/// Merge sorted `incoming` into the centroid arrays for one element.
 ///
 /// `UNIT = true` (flush path): every incoming value has weight 1.0.  Phase 3 uses
 /// an 8-wide SIMD fast path; `incoming_weights` is ignored.
 /// `UNIT = false` (merge path): arbitrary weights in `incoming_weights`; f64 is used
 /// for `cumulative`/`normalizer` to stay correct when new_total exceeds ~2^24.
-fn compress<const UNIT: bool>(
+fn compress<const UNIT: bool, T: TensorValue>(
     e_means: &mut [f32],
     e_weights: &mut [f32],
     e_nc: &mut usize,
     e_tw: &mut f32,
-    incoming_means: &[f32],
+    incoming: &[T],
     incoming_weights: &[f32], // ignored when UNIT = true
     compression: usize,
     max_centroids: usize,
 ) {
-    if incoming_means.is_empty() {
+    if incoming.is_empty() {
         return;
     }
 
     let old_nc = *e_nc;
     let incoming_total: f64 = if UNIT {
-        incoming_means.len() as f64
+        incoming.len() as f64
     } else {
         incoming_weights.iter().map(|&w| w as f64).sum()
     };
@@ -537,13 +609,13 @@ fn compress<const UNIT: bool>(
     let mut ni = 0;
 
     // Phase 1: interleaved merge
-    while ci < old_nc && ni < incoming_means.len() {
-        if e_means[ci] <= incoming_means[ni] {
+    while ci < old_nc && ni < incoming.len() {
+        if e_means[ci] <= incoming[ni].to_f32() {
             absorb!(e_means[ci], e_weights[ci]);
             ci += 1;
         } else {
             absorb!(
-                incoming_means[ni],
+                incoming[ni].to_f32(),
                 if UNIT { 1.0f32 } else { incoming_weights[ni] }
             );
             ni += 1;
@@ -557,13 +629,13 @@ fn compress<const UNIT: bool>(
     }
 
     // Phase 3: drain incoming
-    while ni < incoming_means.len() {
-        if UNIT && ni + 8 <= incoming_means.len() {
+    while ni < incoming.len() {
+        if UNIT && ni + 8 <= incoming.len() {
             let proposed_weight = cur_weight + 8.0;
             let q0 = cumulative / new_total;
             let q2 = (cumulative + proposed_weight) / new_total;
             let z = proposed_weight * normalizer;
-            let chunk: [f32; 8] = incoming_means[ni..ni + 8].try_into().unwrap();
+            let chunk: [f32; 8] = std::array::from_fn(|k| incoming[ni + k].to_f32());
             if cur_weight > 0.0 && z <= q0 * (1.0 - q0) && z <= q2 * (1.0 - q2) {
                 let chunk_sum = f32x8::from(chunk).reduce_add();
                 cur_mean += (chunk_sum - 8.0 * cur_mean) / proposed_weight as f32;
@@ -573,7 +645,7 @@ fn compress<const UNIT: bool>(
             }
         }
         absorb!(
-            incoming_means[ni],
+            incoming[ni].to_f32(),
             if UNIT { 1.0f32 } else { incoming_weights[ni] }
         );
         ni += 1;

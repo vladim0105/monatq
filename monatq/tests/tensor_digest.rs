@@ -1,8 +1,8 @@
 use monatq::TensorDigest;
 use statrs::distribution::{ContinuousCDF, Normal, Uniform};
 
-fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest {
-    let mut td = TensorDigest::new(&[1], 100);
+fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32> {
+    let mut td = TensorDigest::<f32>::new(&[1], 100);
     for v in values {
         td.update(&[v]);
     }
@@ -298,4 +298,28 @@ fn merge_all_cells_large() {
     }
     let indices: Vec<usize> = (0..numel).collect();
     let _merged = td.merge_cells(&indices);
+}
+
+#[test]
+fn i32_quantile_accuracy() {
+    // Verify that TensorDigest<i32> correctly estimates quantiles for integer input.
+    let mut d = TensorDigest::<i32>::new(&[1], 100);
+    for i in 1..=1000_i32 {
+        d.update(&[i]);
+    }
+    let q50 = d.quantile(0.5)[0];
+    assert!(
+        (q50 - 500.0).abs() < 2.0,
+        "i32 median {q50} not near 500"
+    );
+    let q10 = d.quantile(0.1)[0];
+    assert!(
+        (q10 - 100.0).abs() < 2.0,
+        "i32 q10 {q10} not near 100"
+    );
+    let q90 = d.quantile(0.9)[0];
+    assert!(
+        (q90 - 900.0).abs() < 2.0,
+        "i32 q90 {q90} not near 900"
+    );
 }
