@@ -17,11 +17,8 @@ See [monatq-py/README.md](https://github.com/vladim0105/monatq/blob/master/monat
 
 ## Rust
 
-### Installation
-
-```toml
-[dependencies]
-monatq = "0.1"
+```bash
+cargo add monatq
 ```
 
 ### Usage

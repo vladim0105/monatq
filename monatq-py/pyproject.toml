@@ -16,5 +16,12 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "numpy",
+    "torch==2.7.0",
+]
+
 [project.urls]
 Repository = "https://github.com/vladim0105/monatq"

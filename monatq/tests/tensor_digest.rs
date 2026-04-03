@@ -308,18 +308,9 @@ fn i32_quantile_accuracy() {
         d.update(&[i]);
     }
     let q50 = d.quantile(0.5)[0];
-    assert!(
-        (q50 - 500.0).abs() < 2.0,
-        "i32 median {q50} not near 500"
-    );
+    assert!((q50 - 500.0).abs() < 2.0, "i32 median {q50} not near 500");
     let q10 = d.quantile(0.1)[0];
-    assert!(
-        (q10 - 100.0).abs() < 2.0,
-        "i32 q10 {q10} not near 100"
-    );
+    assert!((q10 - 100.0).abs() < 2.0, "i32 q10 {q10} not near 100");
     let q90 = d.quantile(0.9)[0];
-    assert!(
-        (q90 - 900.0).abs() < 2.0,
-        "i32 q90 {q90} not near 900"
-    );
+    assert!((q90 - 900.0).abs() < 2.0, "i32 q90 {q90} not near 900");
 }

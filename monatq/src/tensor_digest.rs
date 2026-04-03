@@ -1,54 +1,13 @@
 use rayon::prelude::*;
-use strum::IntoEnumIterator;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
+use strum::IntoEnumIterator;
 use wide::f32x8;
 
-use crate::distribution::{Distribution, N_PADDED, probe_points, ref_profiles};
-
-/// Trait for types that can be stored in a `TensorDigest`.
-///
-/// T-Digest centroids and weights always stay `f32` (algorithm requirement).
-/// This trait provides the conversion needed when incoming values are consumed
-/// during `compress()`.
-pub trait TensorValue: Copy + Send + Sync + 'static + PartialOrd {
-    /// One-byte tag stored as the first field of every saved `TensorDigest` file.
-    const DTYPE_TAG: u8;
-    /// Convert this value to `f32` for use in centroid arithmetic.
-    fn to_f32(self) -> f32;
-    /// Construct a value from its `f32` representation (used for centroid-derived bounds).
-    fn from_f32(f: f32) -> Self;
-    /// Returns `true` if this value is considered non-zero.
-    fn is_nonzero(self) -> bool;
-    /// Sentinel used to initialise minimum trackers (should be the type's maximum value).
-    fn min_sentinel() -> Self;
-    /// Sentinel used to initialise maximum trackers (should be the type's minimum value).
-    fn max_sentinel() -> Self;
-}
-
-impl TensorValue for f32 {
-    const DTYPE_TAG: u8 = 0;
-    #[inline(always)]
-    fn to_f32(self) -> f32 { self }
-    #[inline(always)]
-    fn from_f32(f: f32) -> Self { f }
-    #[inline(always)]
-    fn is_nonzero(self) -> bool { self.abs() > 1e-12 }
-    fn min_sentinel() -> Self { f32::INFINITY }
-    fn max_sentinel() -> Self { f32::NEG_INFINITY }
-}
-
-impl TensorValue for i32 {
-    const DTYPE_TAG: u8 = 1;
-    #[inline(always)]
-    fn to_f32(self) -> f32 { self as f32 }
-    #[inline(always)]
-    fn from_f32(f: f32) -> Self { f as i32 }
-    #[inline(always)]
-    fn is_nonzero(self) -> bool { self != 0 }
-    fn min_sentinel() -> Self { i32::MAX }
-    fn max_sentinel() -> Self { i32::MIN }
-}
+use crate::{
+    TensorValue,
+    distribution::{Distribution, N_PADDED, probe_points, ref_profiles},
+};
 
 /// Flat-array TensorDigest.
 ///
@@ -172,7 +131,8 @@ impl<T: TensorValue> TensorDigest<T> {
             .enumerate()
             .for_each_init(
                 || Vec::with_capacity(n),
-                |new_values: &mut Vec<T>, (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
+                |new_values: &mut Vec<T>,
+                 (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
                     // Reuse one scratch vector per worker to avoid per-element allocation churn.
                     new_values.clear();
                     new_values.extend((0..n).map(|s| row_buffer[s * numel + e]));
@@ -228,7 +188,13 @@ impl<T: TensorValue> TensorDigest<T> {
             .zip(self.mins.par_iter())
             .zip(self.maxs.par_iter())
             .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                analyze_element(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32())
+                analyze_element(
+                    &means[..nc],
+                    &weights[..nc],
+                    tw,
+                    min_v.to_f32(),
+                    max_v.to_f32(),
+                )
             })
             .collect()
     }
@@ -404,7 +370,14 @@ impl<T: TensorValue> TensorDigest<T> {
             .zip(self.mins.par_iter())
             .zip(self.maxs.par_iter())
             .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32(), q)
+                quantile_from_centroids(
+                    &means[..nc],
+                    &weights[..nc],
+                    tw,
+                    min_v.to_f32(),
+                    max_v.to_f32(),
+                    q,
+                )
             })
             .collect()
     }
@@ -535,20 +508,33 @@ fn analyze_element(
 
 #[inline]
 fn update_min<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
-    if candidate < *current { *current = candidate; }
+    if candidate < *current {
+        *current = candidate;
+    }
 }
 
 #[inline]
 fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
-    if candidate > *current { *current = candidate; }
+    if candidate > *current {
+        *current = candidate;
+    }
 }
 
 /// Merge sorted `incoming` into the centroid arrays for one element.
 ///
-/// `UNIT = true` (flush path): every incoming value has weight 1.0.  Phase 3 uses
-/// an 8-wide SIMD fast path; `incoming_weights` is ignored.
-/// `UNIT = false` (merge path): arbitrary weights in `incoming_weights`; f64 is used
-/// for `cumulative`/`normalizer` to stay correct when new_total exceeds ~2^24.
+/// Merge `incoming` values into the per-element t-digest stored in `e_*`.
+///
+/// `UNIT` is a **compile-time** boolean that selects between two calling modes.
+/// Using a const generic (rather than a runtime flag) lets the compiler monomorphize
+/// two separate versions, eliminating all dead branches at compile time — which matters
+/// because the `if UNIT` guards appear inside the hot Phase 3 loop.
+///
+/// - `UNIT = true` (flush path): every incoming value has weight 1.0.  `incoming_weights`
+///   is ignored (pass `&[]`).  Phase 3 uses an 8-wide SIMD fast path.
+/// - `UNIT = false` (merge path): incoming values carry arbitrary weights from
+///   `incoming_weights`.  f64 is used for `cumulative`/`normalizer` to stay correct
+///   when `new_total` exceeds ~2^24.
+#[allow(clippy::too_many_arguments)]
 fn compress<const UNIT: bool, T: TensorValue>(
     e_means: &mut [f32],
     e_weights: &mut [f32],
