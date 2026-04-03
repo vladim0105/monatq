@@ -39,8 +39,8 @@ digest = TensorDigest.load("checkpoint.mq")
 - **Model interpretability** - feed activation or weight tensors through a forward pass and query per-position quantiles to understand how individual neurons or channels behave across inputs.
 - **Quantization & pruning** - characterise the value distribution at each position to inform bit-width selection, clipping ranges, or sparsity thresholds without storing all observations in memory.
 
-![monatq visualizer](../example.png)
+![monatq visualizer](https://raw.githubusercontent.com/vladim0105/monatq/master/example.png)
 
 ## License
 
-Apache-2.0 - see [LICENSE](../LICENSE).
+Apache-2.0 - see [LICENSE](https://github.com/vladim0105/monatq/blob/master/LICENSE).
