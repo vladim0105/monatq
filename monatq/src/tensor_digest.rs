@@ -200,8 +200,8 @@ impl<T: TensorValue> TensorDigest<T> {
     }
 
     /// Query multiple quantiles for a single element by flat index.
-    /// Call `flush()` before using if samples may be buffered.
-    pub fn cell_quantiles(&self, idx: usize, qs: &[f32]) -> Vec<f32> {
+    pub fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+        self.flush();
         let start = idx * self.max_centroids;
         let nc = self.n_centroids[idx];
         let tw = self.total_weights[idx];
@@ -401,7 +401,8 @@ impl<T: TensorValue> TensorDigest<T> {
     ///
     /// This is intended for visualization of sparse tensors where exact zeros dominate the
     /// estimated density.
-    pub fn without_zeros(&self) -> Self {
+    pub fn without_zeros(&mut self) -> Self {
+        self.flush();
         let mut filtered = TensorDigest::new(&self.shape, self.compression);
         let eps = 1e-12_f32;
 

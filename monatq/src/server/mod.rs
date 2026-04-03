@@ -262,7 +262,7 @@ fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usiz
 }
 
 fn json_digest_cell<T: TensorValue>(
-    digest: &TensorDigest<T>,
+    digest: &mut TensorDigest<T>,
     dist: Distribution,
     label: &str,
     q_lo: f32,
@@ -312,7 +312,7 @@ fn json_cell<T: TensorValue>(
     } else {
         single
     };
-    json_digest_cell(&filtered, dist, "cell", q_lo, q_hi)
+    json_digest_cell(&mut filtered, dist, "cell", q_lo, q_hi)
 }
 
 fn json_digest_merged<T: TensorValue>(
@@ -329,5 +329,5 @@ fn json_digest_merged<T: TensorValue>(
         .into_iter()
         .next()
         .unwrap_or(Distribution::Unknown);
-    json_digest_cell(&merged, dist, "merged", q_lo, q_hi)
+    json_digest_cell(&mut merged, dist, "merged", q_lo, q_hi)
 }
