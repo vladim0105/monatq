@@ -280,7 +280,7 @@ fn json_digest_cell<T: TensorValue>(
     let box_qs = digest.cell_quantiles(0, &[0.25, 0.50, 0.75]);
     let (q25, q50, q75) = (box_qs[0], box_qs[1], box_qs[2]);
 
-    let count = digest.total_weight(0) as u64;
+    let count = digest.total_weight(0);
 
     let pdf_pts = qs
         .iter()
@@ -306,8 +306,8 @@ fn json_cell<T: TensorValue>(
         .get(idx)
         .copied()
         .unwrap_or(Distribution::Normal);
-    let single = digest.merge_cells(&[idx]);
-    let filtered = if exclude_zero {
+    let mut single = digest.merge_cells(&[idx]);
+    let mut filtered = if exclude_zero {
         single.without_zeros()
     } else {
         single
