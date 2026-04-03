@@ -545,6 +545,13 @@ fn compress<const UNIT: bool, T: TensorValue>(
     compression: usize,
     max_centroids: usize,
 ) {
+    if UNIT {
+        debug_assert!(
+            incoming_weights.is_empty(),
+            "UNIT=true compress called with non-empty incoming_weights"
+        );
+    }
+
     if incoming.is_empty() {
         return;
     }
