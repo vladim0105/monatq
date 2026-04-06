@@ -115,9 +115,7 @@ impl Distribution {
                 const D: f64 = 0.8660254037844387; // sqrt(3)/2
                 const SC: f64 = 0.5;
                 let n = Normal::new(0.0, 1.0).unwrap();
-                let cdf = |x: f64| {
-                    0.5 * n.cdf((x + D) / SC) + 0.5 * n.cdf((x - D) / SC)
-                };
+                let cdf = |x: f64| 0.5 * n.cdf((x + D) / SC) + 0.5 * n.cdf((x - D) / SC);
                 let mut lo = -20f64;
                 let mut hi = 20f64;
                 for _ in 0..60 {
