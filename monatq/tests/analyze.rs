@@ -60,7 +60,7 @@ fn analyze_lognormal() {
 
 #[test]
 fn analyze_degenerate() {
-    let mut d = make_digest(std::iter::repeat(5.0f32).take(200));
+    let mut d = make_digest(std::iter::repeat_n(5.0f32, 200));
     assert_eq!(d.analyze()[0], Distribution::Normal);
 }
 
