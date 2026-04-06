@@ -475,7 +475,7 @@ fn analyze_element(
     const D_U: f32 = 10.8;
 
     if means.is_empty() {
-        return Distribution::Normal;
+        return Distribution::Unknown;
     }
 
     let med = quantile_from_centroids(means, weights, total_weight, min_v, max_v, 0.5);
@@ -484,7 +484,7 @@ fn analyze_element(
         / 2.0;
 
     if std.abs() < 1e-6 {
-        return Distribution::Normal;
+        return Distribution::Unknown;
     }
 
     let probes = probe_points();

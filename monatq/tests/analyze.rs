@@ -61,7 +61,22 @@ fn analyze_lognormal() {
 #[test]
 fn analyze_degenerate() {
     let mut d = make_digest(std::iter::repeat_n(5.0f32, 200));
-    assert_eq!(d.analyze()[0], Distribution::Normal);
+    assert_eq!(d.analyze()[0], Distribution::Unknown);
+}
+
+#[test]
+fn analyze_binormal() {
+    // Generate samples from 0.5·N(-d, σ_c) + 0.5·N(+d, σ_c) with d=√3/2, σ_c=0.5
+    const D: f32 = 0.8660254;
+    let half = 1000usize;
+    let comp = statrs::distribution::Normal::new(0.0, 0.5).unwrap();
+    let mut vals: Vec<f32> = (1..=half)
+        .map(|i| comp.inverse_cdf(i as f64 / (half + 1) as f64) as f32 - D)
+        .chain((1..=half).map(|i| comp.inverse_cdf(i as f64 / (half + 1) as f64) as f32 + D))
+        .collect();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut d = make_digest(vals);
+    assert_eq!(d.analyze()[0], Distribution::BiNormal);
 }
 
 #[test]

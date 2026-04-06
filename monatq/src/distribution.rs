@@ -7,7 +7,7 @@ pub(crate) const N_PROBES: usize = 50;
 /// Padded to the next multiple of 8 so the SIMD loop in `kernel` needs no scalar tail.
 pub(crate) const N_PADDED: usize = 56;
 /// Number of known (non-Unknown) distribution variants.
-pub(crate) const N_DISTRIBUTIONS: usize = 4;
+pub(crate) const N_DISTRIBUTIONS: usize = 5;
 
 /// Evenly-spaced probe quantiles: p_i = (i + 0.5) / N_PROBES.
 pub(crate) fn probe_points() -> [f32; N_PROBES] {
@@ -53,8 +53,12 @@ pub enum Distribution {
     Uniform,
     Laplace,
     LogNormal,
+    /// Symmetric mixture of two Gaussians: 0.5·N(-d, σ_c) + 0.5·N(+d, σ_c)
+    /// with d = √3/2, σ_c = 0.5 (zero-mean, unit-variance).
+    BiNormal,
     /// Best-fit L1 distance exceeded the calibrated threshold; distribution
-    /// shape does not closely match any of the four known families.
+    /// shape does not closely match any of the known families, or the data
+    /// is degenerate (constant / zero variance).
     #[strum(disabled)]
     Unknown,
 }
@@ -66,6 +70,7 @@ impl std::fmt::Display for Distribution {
             Self::Uniform => "Uniform",
             Self::Laplace => "Laplace",
             Self::LogNormal => "LogNormal",
+            Self::BiNormal => "BiNormal",
             Self::Unknown => "Unknown",
         })
     }
@@ -79,6 +84,7 @@ impl Distribution {
             Distribution::Uniform => 1,
             Distribution::Laplace => 2,
             Distribution::LogNormal => 3,
+            Distribution::BiNormal => 4,
             Distribution::Unknown => unreachable!(),
         }
     }
@@ -100,6 +106,29 @@ impl Distribution {
                 const MEAN: f32 = 1.6487213;
                 const STD: f32 = 2.1612;
                 (LogNormal::new(0.0, 1.0).unwrap().inverse_cdf(p64) as f32 - MEAN) / STD
+            }
+            // Symmetric bimodal: 0.5·N(-d, σ_c) + 0.5·N(+d, σ_c)
+            // d = √3/2, σ_c = 0.5 → mean=0, variance = d² + σ_c² = 0.75 + 0.25 = 1
+            // CDF(x) = 0.5·Φ((x+d)/σ_c) + 0.5·Φ((x-d)/σ_c)
+            // Invert numerically via bisection.
+            Distribution::BiNormal => {
+                const D: f64 = 0.8660254037844387; // sqrt(3)/2
+                const SC: f64 = 0.5;
+                let n = Normal::new(0.0, 1.0).unwrap();
+                let cdf = |x: f64| {
+                    0.5 * n.cdf((x + D) / SC) + 0.5 * n.cdf((x - D) / SC)
+                };
+                let mut lo = -20f64;
+                let mut hi = 20f64;
+                for _ in 0..60 {
+                    let mid = (lo + hi) / 2.0;
+                    if cdf(mid) < p64 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                ((lo + hi) / 2.0) as f32
             }
             Distribution::Unknown => unreachable!("Unknown has no reference quantile"),
         }
