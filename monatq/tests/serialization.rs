@@ -13,10 +13,7 @@ fn make_digest() -> TensorDigest<f32> {
 fn roundtrip() {
     let mut original = make_digest();
     let qs = &[0.1, 0.5, 0.9];
-    let original_quantiles: Vec<Vec<f32>> = qs
-        .iter()
-        .map(|&q| original.quantile(q))
-        .collect();
+    let original_quantiles: Vec<Vec<f32>> = qs.iter().map(|&q| original.quantile(q)).collect();
     let shape = original.shape().to_vec();
     let numel = original.numel();
 

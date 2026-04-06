@@ -16,6 +16,7 @@
   --uniform: #f5a623;
   --laplace: #3dd68c;
   --logn:    #c084fc;
+  --binorm:  #f472b6;
   --panel-h: 260px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -190,6 +191,7 @@ canvas#chart { width: 100%; height: 100%; display: block; }
       <div class="leg" data-d="Uniform"><div class="leg-dot" style="background:var(--uniform)"></div>Uniform</div>
       <div class="leg" data-d="Laplace"><div class="leg-dot" style="background:var(--laplace)"></div>Laplace</div>
       <div class="leg" data-d="LogNormal"><div class="leg-dot" style="background:var(--logn)"></div>LogNormal</div>
+      <div class="leg" data-d="BiNormal"><div class="leg-dot" style="background:var(--binorm)"></div>BiNormal</div>
       <div class="leg" data-d="Unknown"><div class="leg-dot" style="background:#5a6473"></div>Unknown</div>
     </div>
     <div id="global-controls">
@@ -283,6 +285,7 @@ const DIST_COLOR = {
   Uniform:   [245, 158, 11],
   Laplace:   [16,  185, 129],
   LogNormal: [168, 85,  247],
+  BiNormal:  [244, 114, 182],
   Unknown:   [90,  100, 115],
 };
 function distHex(d) {

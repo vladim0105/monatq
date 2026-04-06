@@ -116,13 +116,22 @@ impl From<monatq::AnyTensorDigest> for Inner {
 
 impl Inner {
     fn shape(&self) -> &[usize] {
-        match self { Inner::F32(d) => d.shape(), Inner::I32(d) => d.shape() }
+        match self {
+            Inner::F32(d) => d.shape(),
+            Inner::I32(d) => d.shape(),
+        }
     }
     fn numel(&self) -> usize {
-        match self { Inner::F32(d) => d.numel(), Inner::I32(d) => d.numel() }
+        match self {
+            Inner::F32(d) => d.numel(),
+            Inner::I32(d) => d.numel(),
+        }
     }
     fn dtype(&self) -> &'static str {
-        match self { Inner::F32(_) => "float32", Inner::I32(_) => "int32" }
+        match self {
+            Inner::F32(_) => "float32",
+            Inner::I32(_) => "int32",
+        }
     }
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let numel = self.numel();
@@ -133,20 +142,35 @@ impl Inner {
         }
     }
     fn flush(&mut self) {
-        match self { Inner::F32(d) => d.flush(), Inner::I32(d) => d.flush() }
+        match self {
+            Inner::F32(d) => d.flush(),
+            Inner::I32(d) => d.flush(),
+        }
     }
     fn quantile(&mut self, q: f32) -> Vec<f32> {
-        match self { Inner::F32(d) => d.quantile(q), Inner::I32(d) => d.quantile(q) }
+        match self {
+            Inner::F32(d) => d.quantile(q),
+            Inner::I32(d) => d.quantile(q),
+        }
     }
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
-        match self { Inner::F32(d) => d.quantiles(qs), Inner::I32(d) => d.quantiles(qs) }
+        match self {
+            Inner::F32(d) => d.quantiles(qs),
+            Inner::I32(d) => d.quantiles(qs),
+        }
     }
     fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
         self.flush();
-        match self { Inner::F32(d) => d.cell_quantiles(idx, qs), Inner::I32(d) => d.cell_quantiles(idx, qs) }
+        match self {
+            Inner::F32(d) => d.cell_quantiles(idx, qs),
+            Inner::I32(d) => d.cell_quantiles(idx, qs),
+        }
     }
     fn analyze(&mut self) -> Vec<monatq::Distribution> {
-        match self { Inner::F32(d) => d.analyze(), Inner::I32(d) => d.analyze() }
+        match self {
+            Inner::F32(d) => d.analyze(),
+            Inner::I32(d) => d.analyze(),
+        }
     }
     fn merge_cells(&mut self, indices: &[usize]) -> Self {
         match self {
@@ -161,13 +185,22 @@ impl Inner {
         }
     }
     fn merge_all(&mut self) -> Self {
-        match self { Inner::F32(d) => Inner::F32(d.merge_all()), Inner::I32(d) => Inner::I32(d.merge_all()) }
+        match self {
+            Inner::F32(d) => Inner::F32(d.merge_all()),
+            Inner::I32(d) => Inner::I32(d.merge_all()),
+        }
     }
     fn save(&mut self, path: &str) -> std::io::Result<()> {
-        match self { Inner::F32(d) => d.save(path), Inner::I32(d) => d.save(path) }
+        match self {
+            Inner::F32(d) => d.save(path),
+            Inner::I32(d) => d.save(path),
+        }
     }
     fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
-        match self { Inner::F32(d) => d.visualize_until(stop), Inner::I32(d) => d.visualize_until(stop) }
+        match self {
+            Inner::F32(d) => d.visualize_until(stop),
+            Inner::I32(d) => d.visualize_until(stop),
+        }
     }
 }
 
@@ -180,7 +213,11 @@ struct PyTensorDigest {
 impl PyTensorDigest {
     #[new]
     #[pyo3(signature = (shape, compression, dtype = None))]
-    fn new(shape: Vec<usize>, compression: usize, dtype: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    fn new(
+        shape: Vec<usize>,
+        compression: usize,
+        dtype: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         let inner = match dtype.map(normalize_dtype).transpose()?.unwrap_or("float32") {
             "float32" => Inner::F32(monatq::TensorDigest::<f32>::new(&shape, compression)),
             "int32" => Inner::I32(monatq::TensorDigest::<i32>::new(&shape, compression)),
@@ -190,23 +227,35 @@ impl PyTensorDigest {
     }
 
     #[getter]
-    fn shape(&self) -> Vec<usize> { self.inner.shape().to_vec() }
+    fn shape(&self) -> Vec<usize> {
+        self.inner.shape().to_vec()
+    }
 
     #[getter]
-    fn numel(&self) -> usize { self.inner.numel() }
+    fn numel(&self) -> usize {
+        self.inner.numel()
+    }
 
     #[getter]
-    fn dtype(&self) -> &str { self.inner.dtype() }
+    fn dtype(&self) -> &str {
+        self.inner.dtype()
+    }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         self.inner.update(py, data)
     }
 
-    fn flush(&mut self) { self.inner.flush() }
+    fn flush(&mut self) {
+        self.inner.flush()
+    }
 
-    fn quantile(&mut self, q: f32) -> Vec<f32> { self.inner.quantile(q) }
+    fn quantile(&mut self, q: f32) -> Vec<f32> {
+        self.inner.quantile(q)
+    }
 
-    fn quantiles(&mut self, qs: Vec<f32>) -> Vec<Vec<f32>> { self.inner.quantiles(&qs) }
+    fn quantiles(&mut self, qs: Vec<f32>) -> Vec<Vec<f32>> {
+        self.inner.quantiles(&qs)
+    }
 
     fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> Vec<f32> {
         self.inner.cell_quantiles(idx, &qs)
@@ -217,15 +266,21 @@ impl PyTensorDigest {
     }
 
     fn merge_cells(&mut self, indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest { inner: self.inner.merge_cells(&indices) }
+        PyTensorDigest {
+            inner: self.inner.merge_cells(&indices),
+        }
     }
 
     fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest { inner: self.inner.merge_channels(&channel_indices) }
+        PyTensorDigest {
+            inner: self.inner.merge_channels(&channel_indices),
+        }
     }
 
     fn merge_all(&mut self) -> PyTensorDigest {
-        PyTensorDigest { inner: self.inner.merge_all() }
+        PyTensorDigest {
+            inner: self.inner.merge_all(),
+        }
     }
 
     fn save(&mut self, path: &str) -> PyResult<()> {

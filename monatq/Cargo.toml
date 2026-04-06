@@ -1,6 +1,6 @@
 [package]
 name = "monatq"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates"
 license = "Apache-2.0"

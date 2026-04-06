@@ -1,54 +1,13 @@
 use rayon::prelude::*;
-use strum::IntoEnumIterator;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
+use strum::IntoEnumIterator;
 use wide::f32x8;
 
-use crate::distribution::{Distribution, N_PADDED, probe_points, ref_profiles};
-
-/// Trait for types that can be stored in a `TensorDigest`.
-///
-/// T-Digest centroids and weights always stay `f32` (algorithm requirement).
-/// This trait provides the conversion needed when incoming values are consumed
-/// during `compress()`.
-pub trait TensorValue: Copy + Send + Sync + 'static + PartialOrd {
-    /// One-byte tag stored as the first field of every saved `TensorDigest` file.
-    const DTYPE_TAG: u8;
-    /// Convert this value to `f32` for use in centroid arithmetic.
-    fn to_f32(self) -> f32;
-    /// Construct a value from its `f32` representation (used for centroid-derived bounds).
-    fn from_f32(f: f32) -> Self;
-    /// Returns `true` if this value is considered non-zero.
-    fn is_nonzero(self) -> bool;
-    /// Sentinel used to initialise minimum trackers (should be the type's maximum value).
-    fn min_sentinel() -> Self;
-    /// Sentinel used to initialise maximum trackers (should be the type's minimum value).
-    fn max_sentinel() -> Self;
-}
-
-impl TensorValue for f32 {
-    const DTYPE_TAG: u8 = 0;
-    #[inline(always)]
-    fn to_f32(self) -> f32 { self }
-    #[inline(always)]
-    fn from_f32(f: f32) -> Self { f }
-    #[inline(always)]
-    fn is_nonzero(self) -> bool { self.abs() > 1e-12 }
-    fn min_sentinel() -> Self { f32::INFINITY }
-    fn max_sentinel() -> Self { f32::NEG_INFINITY }
-}
-
-impl TensorValue for i32 {
-    const DTYPE_TAG: u8 = 1;
-    #[inline(always)]
-    fn to_f32(self) -> f32 { self as f32 }
-    #[inline(always)]
-    fn from_f32(f: f32) -> Self { f as i32 }
-    #[inline(always)]
-    fn is_nonzero(self) -> bool { self != 0 }
-    fn min_sentinel() -> Self { i32::MAX }
-    fn max_sentinel() -> Self { i32::MIN }
-}
+use crate::{
+    TensorValue,
+    distribution::{Distribution, N_PADDED, probe_points, ref_profiles},
+};
 
 /// Flat-array TensorDigest.
 ///
@@ -73,9 +32,9 @@ pub struct TensorDigest<T: TensorValue> {
     // Per-element centroid storage.
     max_centroids: usize,
     centroids_means: Vec<f32>,
-    centroids_weights: Vec<f32>,
+    centroids_weights: Vec<u32>,
     n_centroids: Vec<usize>,
-    total_weights: Vec<f32>,
+    total_weights: Vec<u32>,
     mins: Vec<T>,
     maxs: Vec<T>,
 }
@@ -102,9 +61,9 @@ impl<T: TensorValue> TensorDigest<T> {
             n_buffered: 0,
             max_centroids,
             centroids_means: vec![0.0f32; numel * max_centroids],
-            centroids_weights: vec![0.0f32; numel * max_centroids],
+            centroids_weights: vec![0u32; numel * max_centroids],
             n_centroids: vec![0usize; numel],
-            total_weights: vec![0.0f32; numel],
+            total_weights: vec![0u32; numel],
             mins: vec![T::min_sentinel(); numel],
             maxs: vec![T::max_sentinel(); numel],
         }
@@ -120,8 +79,8 @@ impl<T: TensorValue> TensorDigest<T> {
         &self.shape
     }
 
-    /// Total weight (≈ sample count) accumulated at element `idx`.
-    pub fn total_weight(&self, idx: usize) -> f32 {
+    /// Total weight (sample count) accumulated at element `idx`.
+    pub fn total_weight(&self, idx: usize) -> u32 {
         self.total_weights[idx]
     }
 
@@ -172,7 +131,8 @@ impl<T: TensorValue> TensorDigest<T> {
             .enumerate()
             .for_each_init(
                 || Vec::with_capacity(n),
-                |new_values: &mut Vec<T>, (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
+                |new_values: &mut Vec<T>,
+                 (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
                     // Reuse one scratch vector per worker to avoid per-element allocation churn.
                     new_values.clear();
                     new_values.extend((0..n).map(|s| row_buffer[s * numel + e]));
@@ -228,17 +188,23 @@ impl<T: TensorValue> TensorDigest<T> {
             .zip(self.mins.par_iter())
             .zip(self.maxs.par_iter())
             .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                analyze_element(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32())
+                analyze_element(
+                    &means[..nc],
+                    &weights[..nc],
+                    tw as f32,
+                    min_v.to_f32(),
+                    max_v.to_f32(),
+                )
             })
             .collect()
     }
 
     /// Query multiple quantiles for a single element by flat index.
-    /// Call `flush()` before using if samples may be buffered.
-    pub fn cell_quantiles(&self, idx: usize, qs: &[f32]) -> Vec<f32> {
+    pub fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+        self.flush();
         let start = idx * self.max_centroids;
         let nc = self.n_centroids[idx];
-        let tw = self.total_weights[idx];
+        let tw = self.total_weights[idx] as f32;
         let means = &self.centroids_means[start..start + nc];
         let weights = &self.centroids_weights[start..start + nc];
         let min_v = self.mins[idx].to_f32();
@@ -263,7 +229,7 @@ impl<T: TensorValue> TensorDigest<T> {
         // overflow that occurs when merging element-by-element: early passes see a tiny
         // new_total, so the normalizer is large, the per-centroid budget is tight, and the
         // output count blows past max_centroids.
-        let mut all: Vec<(f32, f32)> = Vec::new();
+        let mut all: Vec<(f32, u32)> = Vec::new();
         for &idx in indices {
             let start = idx * self.max_centroids;
             let nc = self.n_centroids[idx];
@@ -278,7 +244,7 @@ impl<T: TensorValue> TensorDigest<T> {
         }
 
         all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        let (all_means, all_weights): (Vec<f32>, Vec<f32>) = all.into_iter().unzip();
+        let (all_means, all_weights): (Vec<f32>, Vec<u32>) = all.into_iter().unzip();
 
         compress::<false, f32>(
             &mut merged.centroids_means[..merged.max_centroids],
@@ -305,7 +271,7 @@ impl<T: TensorValue> TensorDigest<T> {
 
         // Phase 1: merge each channel's cells independently via merge_cells.
         // Phase 2: collect the compressed per-channel centroids and do one final compress.
-        let mut all: Vec<(f32, f32)> = Vec::new();
+        let mut all: Vec<(f32, u32)> = Vec::new();
         let mut min = T::min_sentinel();
         let mut max = T::max_sentinel();
 
@@ -326,7 +292,7 @@ impl<T: TensorValue> TensorDigest<T> {
         merged.mins[0] = min;
         merged.maxs[0] = max;
         all.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        let (all_means, all_weights): (Vec<f32>, Vec<f32>) = all.into_iter().unzip();
+        let (all_means, all_weights): (Vec<f32>, Vec<u32>) = all.into_iter().unzip();
 
         compress::<false, f32>(
             &mut merged.centroids_means[..merged.max_centroids],
@@ -404,7 +370,14 @@ impl<T: TensorValue> TensorDigest<T> {
             .zip(self.mins.par_iter())
             .zip(self.maxs.par_iter())
             .map(|(((((means, weights), &nc), &tw), &min_v), &max_v)| {
-                quantile_from_centroids(&means[..nc], &weights[..nc], tw, min_v.to_f32(), max_v.to_f32(), q)
+                quantile_from_centroids(
+                    &means[..nc],
+                    &weights[..nc],
+                    tw as f32,
+                    min_v.to_f32(),
+                    max_v.to_f32(),
+                    q,
+                )
             })
             .collect()
     }
@@ -428,7 +401,8 @@ impl<T: TensorValue> TensorDigest<T> {
     ///
     /// This is intended for visualization of sparse tensors where exact zeros dominate the
     /// estimated density.
-    pub fn without_zeros(&self) -> Self {
+    pub fn without_zeros(&mut self) -> Self {
+        self.flush();
         let mut filtered = TensorDigest::new(&self.shape, self.compression);
         let eps = 1e-12_f32;
 
@@ -440,7 +414,7 @@ impl<T: TensorValue> TensorDigest<T> {
             let src_weights = &self.centroids_weights[src_start..src_start + nc];
 
             let mut out_nc = 0usize;
-            let mut out_tw = 0.0f32;
+            let mut out_tw = 0u32;
             let mut out_min = f32::INFINITY;
             let mut out_max = f32::NEG_INFINITY;
 
@@ -493,7 +467,7 @@ fn l1_simd(a: &[f32; N_PADDED], b: &[f32; N_PADDED]) -> f32 {
 
 fn analyze_element(
     means: &[f32],
-    weights: &[f32],
+    weights: &[u32],
     total_weight: f32,
     min_v: f32,
     max_v: f32,
@@ -501,7 +475,7 @@ fn analyze_element(
     const D_U: f32 = 10.8;
 
     if means.is_empty() {
-        return Distribution::Normal;
+        return Distribution::Unknown;
     }
 
     let med = quantile_from_centroids(means, weights, total_weight, min_v, max_v, 0.5);
@@ -510,7 +484,7 @@ fn analyze_element(
         / 2.0;
 
     if std.abs() < 1e-6 {
-        return Distribution::Normal;
+        return Distribution::Unknown;
     }
 
     let probes = probe_points();
@@ -535,68 +509,89 @@ fn analyze_element(
 
 #[inline]
 fn update_min<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
-    if candidate < *current { *current = candidate; }
+    if candidate < *current {
+        *current = candidate;
+    }
 }
 
 #[inline]
 fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
-    if candidate > *current { *current = candidate; }
+    if candidate > *current {
+        *current = candidate;
+    }
 }
 
 /// Merge sorted `incoming` into the centroid arrays for one element.
 ///
-/// `UNIT = true` (flush path): every incoming value has weight 1.0.  Phase 3 uses
-/// an 8-wide SIMD fast path; `incoming_weights` is ignored.
-/// `UNIT = false` (merge path): arbitrary weights in `incoming_weights`; f64 is used
-/// for `cumulative`/`normalizer` to stay correct when new_total exceeds ~2^24.
+/// Merge `incoming` values into the per-element t-digest stored in `e_*`.
+///
+/// `UNIT` is a **compile-time** boolean that selects between two calling modes.
+/// Using a const generic (rather than a runtime flag) lets the compiler monomorphize
+/// two separate versions, eliminating all dead branches at compile time — which matters
+/// because the `if UNIT` guards appear inside the hot Phase 3 loop.
+///
+/// - `UNIT = true` (flush path): every incoming value has weight 1.0.  `incoming_weights`
+///   is ignored (pass `&[]`).  Phase 3 uses an 8-wide SIMD fast path.
+/// - `UNIT = false` (merge path): incoming values carry arbitrary weights from
+///   `incoming_weights`.  u64 is used for `cumulative`/`new_total` to stay correct
+///   when the sum of two u32-bounded digests exceeds u32::MAX.
+#[allow(clippy::too_many_arguments)]
 fn compress<const UNIT: bool, T: TensorValue>(
     e_means: &mut [f32],
-    e_weights: &mut [f32],
+    e_weights: &mut [u32],
     e_nc: &mut usize,
-    e_tw: &mut f32,
+    e_tw: &mut u32,
     incoming: &[T],
-    incoming_weights: &[f32], // ignored when UNIT = true
+    incoming_weights: &[u32], // ignored when UNIT = true
     compression: usize,
     max_centroids: usize,
 ) {
+    if UNIT {
+        debug_assert!(
+            incoming_weights.is_empty(),
+            "UNIT=true compress called with non-empty incoming_weights"
+        );
+    }
+
     if incoming.is_empty() {
         return;
     }
 
     let old_nc = *e_nc;
-    let incoming_total: f64 = if UNIT {
-        incoming.len() as f64
+    let incoming_total: u64 = if UNIT {
+        incoming.len() as u64
     } else {
-        incoming_weights.iter().map(|&w| w as f64).sum()
+        incoming_weights.iter().map(|&w| w as u64).sum()
     };
-    let new_total: f64 = *e_tw as f64 + incoming_total;
+    let new_total: u64 = *e_tw as u64 + incoming_total;
     let mut out_means: Vec<f32> = Vec::with_capacity(max_centroids);
-    let mut out_weights: Vec<f32> = Vec::with_capacity(max_centroids);
+    let mut out_weights: Vec<u32> = Vec::with_capacity(max_centroids);
 
     let mut cur_mean = 0.0f32;
-    let mut cur_weight = 0.0f64;
-    let mut cumulative = 0.0f64;
-    let normalizer: f64 = if new_total > 1.0 {
-        compression as f64 / (2.0 * std::f64::consts::PI * new_total * new_total.ln())
+    let mut cur_weight = 0u64;
+    let mut cumulative = 0u64;
+    let normalizer: f64 = if new_total > 1 {
+        compression as f64
+            / (2.0 * std::f64::consts::PI * new_total as f64 * (new_total as f64).ln())
     } else {
         0.0
     };
 
     macro_rules! absorb {
         ($m:expr, $w:expr) => {{
-            let (m, w) = ($m as f32, $w as f64);
+            let (m, w) = ($m as f32, $w as u64);
             let proposed_weight = cur_weight + w;
-            let q0 = cumulative / new_total;
-            let q2 = (cumulative + proposed_weight) / new_total;
-            let z = proposed_weight * normalizer;
-            let should_add = cur_weight > 0.0 && z <= q0 * (1.0 - q0) && z <= q2 * (1.0 - q2);
+            let q0 = cumulative as f64 / new_total as f64;
+            let q2 = (cumulative + proposed_weight) as f64 / new_total as f64;
+            let z = proposed_weight as f64 * normalizer;
+            let should_add = cur_weight > 0 && z <= q0 * (1.0 - q0) && z <= q2 * (1.0 - q2);
             if should_add {
-                cur_mean += (w / proposed_weight) as f32 * (m - cur_mean);
+                cur_mean += (w as f64 / proposed_weight as f64) as f32 * (m - cur_mean);
                 cur_weight = proposed_weight;
             } else {
-                if cur_weight > 0.0 {
+                if cur_weight > 0 {
                     out_means.push(cur_mean);
-                    out_weights.push(cur_weight as f32);
+                    out_weights.push(cur_weight as u32);
                 }
                 cumulative += cur_weight;
                 cur_mean = m;
@@ -616,7 +611,7 @@ fn compress<const UNIT: bool, T: TensorValue>(
         } else {
             absorb!(
                 incoming[ni].to_f32(),
-                if UNIT { 1.0f32 } else { incoming_weights[ni] }
+                if UNIT { 1u32 } else { incoming_weights[ni] }
             );
             ni += 1;
         }
@@ -631,12 +626,12 @@ fn compress<const UNIT: bool, T: TensorValue>(
     // Phase 3: drain incoming
     while ni < incoming.len() {
         if UNIT && ni + 8 <= incoming.len() {
-            let proposed_weight = cur_weight + 8.0;
-            let q0 = cumulative / new_total;
-            let q2 = (cumulative + proposed_weight) / new_total;
-            let z = proposed_weight * normalizer;
+            let proposed_weight = cur_weight + 8;
+            let q0 = cumulative as f64 / new_total as f64;
+            let q2 = (cumulative + proposed_weight) as f64 / new_total as f64;
+            let z = proposed_weight as f64 * normalizer;
             let chunk: [f32; 8] = std::array::from_fn(|k| incoming[ni + k].to_f32());
-            if cur_weight > 0.0 && z <= q0 * (1.0 - q0) && z <= q2 * (1.0 - q2) {
+            if cur_weight > 0 && z <= q0 * (1.0 - q0) && z <= q2 * (1.0 - q2) {
                 let chunk_sum = f32x8::from(chunk).reduce_add();
                 cur_mean += (chunk_sum - 8.0 * cur_mean) / proposed_weight as f32;
                 cur_weight = proposed_weight;
@@ -646,14 +641,14 @@ fn compress<const UNIT: bool, T: TensorValue>(
         }
         absorb!(
             incoming[ni].to_f32(),
-            if UNIT { 1.0f32 } else { incoming_weights[ni] }
+            if UNIT { 1u32 } else { incoming_weights[ni] }
         );
         ni += 1;
     }
 
-    if cur_weight > 0.0 {
+    if cur_weight > 0 {
         out_means.push(cur_mean);
-        out_weights.push(cur_weight as f32);
+        out_weights.push(cur_weight as u32);
     }
 
     let result_nc = out_means.len();
@@ -666,14 +661,14 @@ fn compress<const UNIT: bool, T: TensorValue>(
     e_means[..result_nc].copy_from_slice(&out_means);
     e_weights[..result_nc].copy_from_slice(&out_weights);
     *e_nc = result_nc;
-    *e_tw = new_total as f32;
+    *e_tw = new_total as u32;
 }
 
 /// Standard TDigest quantile via linear scan + interpolation.
 /// Uses a SIMD chunk-skip loop to locate the target centroid in O(nc/8) SIMD ops.
 fn quantile_from_centroids(
     means: &[f32],
-    weights: &[f32],
+    weights: &[u32],
     total_weight: f32,
     min_v: f32,
     max_v: f32,
@@ -696,12 +691,12 @@ fn quantile_from_centroids(
 
     // Left tail: one sample is known to be at min, so the effective interpolation span is
     // w0/2 - 1 steps (not w0/2).  Guard against w0 <= 2 where the denominator collapses.
-    let first_right = 1.0 + weights[0] / 2.0;
+    let first_right = 1.0 + weights[0] as f32 / 2.0;
     if target <= first_right {
-        if weights[0] <= 1.0 {
+        if weights[0] <= 1 {
             return min_v;
         }
-        let half_w0 = weights[0] / 2.0;
+        let half_w0 = weights[0] as f32 / 2.0;
         let denom = if half_w0 > 1.0 {
             half_w0 - 1.0
         } else {
@@ -713,12 +708,12 @@ fn quantile_from_centroids(
 
     // Right tail: one sample is known to be at max, so the effective span is w_last/2 - 1.
     let last = means.len() - 1;
-    let last_left = total_weight - 1.0 - weights[last] / 2.0;
+    let last_left = total_weight - 1.0 - weights[last] as f32 / 2.0;
     if target >= last_left {
-        if weights[last] <= 1.0 {
+        if weights[last] <= 1 {
             return max_v;
         }
-        let half_wl = weights[last] / 2.0;
+        let half_wl = weights[last] as f32 / 2.0;
         let denom = if half_wl > 1.0 {
             half_wl - 1.0
         } else {
@@ -734,16 +729,16 @@ fn quantile_from_centroids(
     // by 0.5 on each side that is a singleton, matching the RedisBloom t-digest-c behaviour.
     let mut cumulative = 0.0f32;
     for i in 0..means.len() - 1 {
-        let left_center = cumulative + weights[i] / 2.0;
-        cumulative += weights[i];
-        let right_center = cumulative + weights[i + 1] / 2.0;
+        let left_center = cumulative + weights[i] as f32 / 2.0;
+        cumulative += weights[i] as f32;
+        let right_center = cumulative + weights[i + 1] as f32 / 2.0;
 
         if target > right_center {
             continue;
         }
 
-        let left_singleton = weights[i] == 1.0;
-        let right_singleton = weights[i + 1] == 1.0;
+        let left_singleton = weights[i] == 1;
+        let right_singleton = weights[i + 1] == 1;
 
         if left_singleton && target - left_center < 0.5 {
             return means[i];

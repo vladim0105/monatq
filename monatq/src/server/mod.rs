@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::distribution::Distribution;
-use crate::tensor_digest::{TensorDigest, TensorValue};
+use crate::tensor_digest::TensorDigest;
+use crate::tensor_value::TensorValue;
 
 static HTML: &str = include_str!("frontend.html");
 
@@ -16,7 +17,10 @@ pub(crate) fn serve<T: TensorValue>(digest: &mut TensorDigest<T>) -> std::io::Re
     serve_until(digest, &stop)
 }
 
-pub(crate) fn serve_until<T: TensorValue>(digest: &mut TensorDigest<T>, stop: &AtomicBool) -> std::io::Result<()> {
+pub(crate) fn serve_until<T: TensorValue>(
+    digest: &mut TensorDigest<T>,
+    stop: &AtomicBool,
+) -> std::io::Result<()> {
     let port = std::env::var("MONATQ_PORT").unwrap_or_else(|_| "7777".to_string());
     let addr = format!("127.0.0.1:{port}");
 
@@ -97,14 +101,12 @@ fn handle<T: TensorValue>(
             let exclude_zero = parse_bool_flag(&q, "exclude_zero");
             let body = match q.get("scope").copied() {
                 Some("tensor") => json_digest_merged(digest.merge_all(), q_lo, q_hi, exclude_zero),
-                Some("channel") => {
-                    json_digest_merged(
-                        digest.merge_channels(&[channel_idx(shape, b, c)]),
-                        q_lo,
-                        q_hi,
-                        exclude_zero,
-                    )
-                }
+                Some("channel") => json_digest_merged(
+                    digest.merge_channels(&[channel_idx(shape, b, c)]),
+                    q_lo,
+                    q_hi,
+                    exclude_zero,
+                ),
                 _ => unreachable!(),
             };
             ("200 OK", "application/json", body)
@@ -221,7 +223,6 @@ fn parse_bool_flag(query: &HashMap<&str, &str>, key: &str) -> bool {
     matches!(query.get(key).copied(), Some("1" | "true" | "yes" | "on"))
 }
 
-
 /// Flat channel index for the given (b, c) coordinates within `shape`.
 fn channel_idx(shape: &[usize], b: usize, c: usize) -> usize {
     match shape.len() {
@@ -261,7 +262,7 @@ fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usiz
 }
 
 fn json_digest_cell<T: TensorValue>(
-    digest: &TensorDigest<T>,
+    digest: &mut TensorDigest<T>,
     dist: Distribution,
     label: &str,
     q_lo: f32,
@@ -279,7 +280,7 @@ fn json_digest_cell<T: TensorValue>(
     let box_qs = digest.cell_quantiles(0, &[0.25, 0.50, 0.75]);
     let (q25, q50, q75) = (box_qs[0], box_qs[1], box_qs[2]);
 
-    let count = digest.total_weight(0) as u64;
+    let count = digest.total_weight(0);
 
     let pdf_pts = qs
         .iter()
@@ -305,16 +306,21 @@ fn json_cell<T: TensorValue>(
         .get(idx)
         .copied()
         .unwrap_or(Distribution::Normal);
-    let single = digest.merge_cells(&[idx]);
-    let filtered = if exclude_zero {
+    let mut single = digest.merge_cells(&[idx]);
+    let mut filtered = if exclude_zero {
         single.without_zeros()
     } else {
         single
     };
-    json_digest_cell(&filtered, dist, "cell", q_lo, q_hi)
+    json_digest_cell(&mut filtered, dist, "cell", q_lo, q_hi)
 }
 
-fn json_digest_merged<T: TensorValue>(mut merged: TensorDigest<T>, q_lo: f32, q_hi: f32, exclude_zero: bool) -> String {
+fn json_digest_merged<T: TensorValue>(
+    mut merged: TensorDigest<T>,
+    q_lo: f32,
+    q_hi: f32,
+    exclude_zero: bool,
+) -> String {
     if exclude_zero {
         merged = merged.without_zeros();
     }
@@ -323,5 +329,5 @@ fn json_digest_merged<T: TensorValue>(mut merged: TensorDigest<T>, q_lo: f32, q_
         .into_iter()
         .next()
         .unwrap_or(Distribution::Unknown);
-    json_digest_cell(&merged, dist, "merged", q_lo, q_hi)
+    json_digest_cell(&mut merged, dist, "merged", q_lo, q_hi)
 }

@@ -41,7 +41,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test
+      - run: make check
+      - run: make test-rust
 
   python:
     runs-on: ubuntu-latest
@@ -52,7 +53,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install maturin pytest numpy
-      - run: pip install "torch==2.7.0" --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e monatq-py/ --no-build-isolation
-      - run: cd monatq-py && python -m pytest tests/
+      - run: python -m venv .venv && echo "VIRTUAL_ENV=$PWD/.venv" >> $GITHUB_ENV && echo "$PWD/.venv/bin" >> $GITHUB_PATH
+      - run: pip install maturin
+      - run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -e "monatq-py[dev]" --no-build-isolation
+      - run: make install
+      - run: make test-python

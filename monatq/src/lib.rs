@@ -2,10 +2,11 @@ pub mod distribution;
 #[cfg(feature = "visualize")]
 pub mod server;
 pub mod tensor_digest;
+pub mod tensor_value;
 
 pub use distribution::Distribution;
 pub use tensor_digest::TensorDigest;
-pub use tensor_digest::TensorValue;
+pub use tensor_value::TensorValue;
 
 /// A loaded digest whose element type was determined at runtime from the file.
 pub enum AnyTensorDigest {
