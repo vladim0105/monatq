@@ -61,7 +61,7 @@ fn single_element() {
 
 #[test]
 fn all_same_value() {
-    let mut d = make_digest(std::iter::repeat(7.0f32).take(200));
+    let mut d = make_digest(std::iter::repeat_n(7.0f32, 200));
     assert_eq!(d.quantile(0.5)[0], 7.0);
 }
 
