@@ -571,7 +571,8 @@ fn compress<const UNIT: bool, T: TensorValue>(
     let mut cur_weight = 0u64;
     let mut cumulative = 0u64;
     let normalizer: f64 = if new_total > 1 {
-        compression as f64 / (2.0 * std::f64::consts::PI * new_total as f64 * (new_total as f64).ln())
+        compression as f64
+            / (2.0 * std::f64::consts::PI * new_total as f64 * (new_total as f64).ln())
     } else {
         0.0
     };
