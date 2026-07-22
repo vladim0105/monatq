@@ -314,16 +314,33 @@ impl<T: TensorValue> TensorDigest<T> {
         self.merge_channels(&(0..n_channels).collect::<Vec<_>>())
     }
 
+    /// Flush pending data and return a zstd-compressed bincode snapshot.
+    pub fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    where
+        T: serde::Serialize,
+    {
+        self.flush();
+        let payload = bincode2::serialize(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        zstd::encode_all(payload.as_slice(), 3).map_err(std::io::Error::other)
+    }
+
     /// Flush pending data and write a zstd-compressed bincode snapshot to `path`.
     pub fn save(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()>
     where
         T: serde::Serialize,
     {
-        self.flush();
-        let bytes = bincode2::serialize(self)
+        std::fs::write(path, self.to_bytes()?)
+    }
+
+    /// Load and decompress a snapshot from memory.
+    pub fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let payload = zstd::decode_all(bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let compressed = zstd::encode_all(bytes.as_slice(), 3).map_err(std::io::Error::other)?;
-        std::fs::write(path, compressed)
+        Self::from_payload(&payload)
     }
 
     /// Load and decompress a snapshot written by `save`.
@@ -331,16 +348,21 @@ impl<T: TensorValue> TensorDigest<T> {
     where
         T: serde::de::DeserializeOwned,
     {
-        let compressed = std::fs::read(path)?;
-        let bytes = zstd::decode_all(compressed.as_slice())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let loaded: Self = bincode2::deserialize(&bytes)
+        let bytes = std::fs::read(path)?;
+        Self::from_bytes(&bytes)
+    }
+
+    pub(crate) fn from_payload(payload: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let loaded: Self = bincode2::deserialize(payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if loaded.dtype_tag != T::DTYPE_TAG {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "dtype mismatch: file contains tag {} but expected {}",
+                    "dtype mismatch: snapshot contains tag {} but expected {}",
                     loaded.dtype_tag,
                     T::DTYPE_TAG
                 ),

@@ -44,12 +44,31 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 let distributions = digest.analyze();
 ```
 
+### Snapshots
+
+```rust
+use monatq::TensorDigest;
+
+let mut digest = TensorDigest::<f32>::new(&[3, 4], 100);
+// ... update the digest ...
+
+// Serialize to memory and restore with a known element type.
+let bytes = digest.to_bytes().unwrap();
+let restored = TensorDigest::<f32>::from_bytes(&bytes).unwrap();
+
+// Or detect f32/i32 from the embedded dtype tag.
+let restored_any = monatq::from_bytes(&bytes).unwrap();
+```
+
+`to_bytes` uses the same zstd-compressed bincode snapshot format as `save`, so file and
+in-memory snapshots are interchangeable.
+
 ## Features
 
 - **Parallel updates** - element-wise compression runs in parallel via Rayon
 - **Custom T-Digest** - optimised implementation for the tensor case, making per-position quantile tracking practical at tensor scale
 - **Distribution analysis** - classify each position as Normal, Uniform, Laplace, or LogNormal by fitting an empirical quantile profile
-- **Save / load** - zstd-compressed bincode snapshots via `digest.save(path)` / `TensorDigest::load(path)`
+- **Snapshots** - zstd-compressed bincode snapshots via file-based `save` / `load` or in-memory `to_bytes` / `from_bytes`
 - **Visualisation** - built-in HTTP server (`digest.visualize()`) for browser-based inspection of a tensor
 
 ## License
