@@ -1,10 +1,12 @@
 pub mod distribution;
+pub mod quantile_spine;
 #[cfg(feature = "visualize")]
 pub mod server;
 pub mod tensor_digest;
 pub mod tensor_value;
 
 pub use distribution::Distribution;
+pub use quantile_spine::{QuantileSpine, QuantileSpineConfig, SpineLink, SpineRegime, TensorSpine};
 pub use tensor_digest::TensorDigest;
 pub use tensor_value::TensorValue;
 
