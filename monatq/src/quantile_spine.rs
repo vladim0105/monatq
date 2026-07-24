@@ -521,7 +521,7 @@ impl<T: TensorValue> QuantileSpine<T> {
                     }
 
                     let n_eff = (old_n as u64).min(config.n_max) as f32;
-                    let base_lambda = n_eff / (n_eff + batch_len as f32);
+                    let base_new_gain = batch_len as f32 / (n_eff + batch_len as f32);
                     // A DKW crossing at tau is expected with probability beta. Letting one
                     // such batch discard most history created rare ~3% rank outliers on
                     // stationary streams. Gate the gain at 1.5 tau, but retain the paper's
@@ -532,11 +532,12 @@ impl<T: TensorValue> QuantileSpine<T> {
                     } else {
                         0.0
                     };
-                    let gamma = f32::exp(-config.gain_c * batch_len as f32 * excess * excess);
-                    let lambda = if suppress_history {
-                        0.0
+                    let surprise_exponent = config.gain_c * batch_len as f32 * excess * excess;
+                    let surprise_new_gain = -f32::exp_m1(-surprise_exponent);
+                    let new_gain = if suppress_history {
+                        1.0
                     } else {
-                        gamma * base_lambda
+                        base_new_gain + surprise_new_gain * (1.0 - base_new_gain)
                     };
                     // Below the DKW threshold the two smooth distributions are
                     // statistically indistinguishable. Their CDF-mixture quantiles agree
@@ -551,7 +552,7 @@ impl<T: TensorValue> QuantileSpine<T> {
                         blend_reanchor_close(
                             &scratch.old,
                             &scratch.smooth,
-                            lambda,
+                            new_gain,
                             &targets,
                             &batch_interpolation,
                             link,
@@ -561,7 +562,7 @@ impl<T: TensorValue> QuantileSpine<T> {
                         blend_reanchor(
                             &scratch.old,
                             &scratch.smooth,
-                            lambda,
+                            new_gain,
                             &targets,
                             &target_axis,
                             link,
@@ -614,37 +615,32 @@ impl<T: TensorValue> QuantileSpine<T> {
         let low = &self.low_records[record_start..record_start + RECORDS_T];
         let high = &self.high_records[record_start..record_start + RECORDS_T];
         let meta = self.metadata[idx];
-        qs.iter()
-            .map(|&q| match self.link {
-                SpineLink::Probit => quantile_element::<PROBIT_LINK>(
-                    anchors,
-                    low,
-                    high,
-                    meta,
-                    self.total_count as usize,
-                    q,
-                    None,
-                ),
-                SpineLink::Linear => quantile_element::<LINEAR_LINK>(
-                    anchors,
-                    low,
-                    high,
-                    meta,
-                    self.total_count as usize,
-                    q,
-                    None,
-                ),
-                SpineLink::LogProbit => quantile_element::<LOG_PROBIT_LINK>(
-                    anchors,
-                    low,
-                    high,
-                    meta,
-                    self.total_count as usize,
-                    q,
-                    None,
-                ),
-            })
-            .collect()
+        match self.link {
+            SpineLink::Probit => quantiles_for_cell::<PROBIT_LINK>(
+                anchors,
+                low,
+                high,
+                meta,
+                self.total_count as usize,
+                qs,
+            ),
+            SpineLink::Linear => quantiles_for_cell::<LINEAR_LINK>(
+                anchors,
+                low,
+                high,
+                meta,
+                self.total_count as usize,
+                qs,
+            ),
+            SpineLink::LogProbit => quantiles_for_cell::<LOG_PROBIT_LINK>(
+                anchors,
+                low,
+                high,
+                meta,
+                self.total_count as usize,
+                qs,
+            ),
+        }
     }
 
     /// Exact all-time minima, one per position.
@@ -811,7 +807,7 @@ impl<T: TensorValue> QuantileSpine<T> {
                 .zip(self.high_records.chunks(RECORDS_T))
                 .zip(self.metadata.iter())
                 .map(|(((anchors, low), high), &meta)| {
-                    quantile_element::<LINK>(anchors, low, high, meta, n, q, Some(interpolation))
+                    quantile_element::<LINK>(anchors, low, high, meta, n, q, interpolation)
                 })
                 .collect();
         }
@@ -821,7 +817,7 @@ impl<T: TensorValue> QuantileSpine<T> {
             .zip(self.high_records.par_chunks(RECORDS_T))
             .zip(self.metadata.par_iter())
             .map(|(((anchors, low), high), &meta)| {
-                quantile_element::<LINK>(anchors, low, high, meta, n, q, Some(interpolation))
+                quantile_element::<LINK>(anchors, low, high, meta, n, q, interpolation)
             })
             .collect()
     }
@@ -1131,6 +1127,29 @@ const fn const_link<const LINK: u8>() -> SpineLink {
     }
 }
 
+fn quantiles_for_cell<const LINK: u8>(
+    anchors: &[f32],
+    low: &[f32],
+    high: &[f32],
+    meta: PositionMeta,
+    n: usize,
+    qs: &[f32],
+) -> Vec<f32> {
+    qs.iter()
+        .map(|&q| {
+            quantile_element::<LINK>(
+                anchors,
+                low,
+                high,
+                meta,
+                n,
+                q,
+                query_interpolation::<LINK>(q),
+            )
+        })
+        .collect()
+}
+
 #[inline(always)]
 fn quantile_element<const LINK: u8>(
     anchors: &[f32],
@@ -1139,7 +1158,7 @@ fn quantile_element<const LINK: u8>(
     meta: PositionMeta,
     n: usize,
     q: f32,
-    interpolation: Option<QueryInterpolation>,
+    interpolation: QueryInterpolation,
 ) -> f32 {
     let link = const_link::<LINK>();
     if n == 0 {
@@ -1178,10 +1197,7 @@ fn quantile_element<const LINK: u8>(
         if let Some(tail) = evt_tail_quantile(anchors, low, high, n, q) {
             return tail;
         }
-        return interpolation.map_or_else(
-            || quantile_from_anchors_for::<LINK>(anchors, q),
-            |ruler| quantile_from_query::<LINK>(anchors, ruler),
-        );
+        return quantile_from_query::<LINK>(anchors, interpolation);
     }
 
     let smooth_count = n.saturating_sub(zero_count).saturating_sub(secondary_count);
@@ -1247,7 +1263,7 @@ fn gpd_factor(tail_ratio: f32, shape: f32) -> f32 {
     if shape.abs() < 1.0e-4 {
         -f32::ln(tail_ratio)
     } else {
-        (f32::powf(tail_ratio, -shape) - 1.0) / shape
+        f32::exp_m1(-shape * f32::ln(tail_ratio)) / shape
     }
 }
 
@@ -1307,8 +1323,8 @@ fn evt_tail_quantile(anchors: &[f32], low: &[f32], high: &[f32], n: usize, q: f3
         }
     }
     let shape = 0.5 * (shape_lower + shape_upper);
-    let scale = outer_excess / gpd_factor(outer_ratio, shape);
-    let excess = scale * gpd_factor(tail_probability / threshold_probability, shape);
+    let excess = outer_excess * gpd_factor(tail_probability / threshold_probability, shape)
+        / gpd_factor(outer_ratio, shape);
     if !excess.is_finite() || excess < outer_excess {
         return None;
     }
@@ -1346,9 +1362,18 @@ fn exact_sorted_quantile(values: &[f32], q: f32) -> f32 {
 fn rank_grid() -> &'static [f32; SPINE_K] {
     static GRID: OnceLock<[f32; SPINE_K]> = OnceLock::new();
     GRID.get_or_init(|| {
-        std::array::from_fn(|j| {
-            0.5 * (1.0 - f32::cos(std::f32::consts::PI * j as f32 / (SPINE_K - 1) as f32))
-        })
+        let mut grid = [0.0; SPINE_K];
+        for j in 0..SPINE_K / 2 {
+            let angle = std::f32::consts::PI * j as f32 / (2 * (SPINE_K - 1)) as f32;
+            let sine = f32::sin(angle);
+            let rank = sine * sine;
+            grid[j] = rank;
+            grid[SPINE_K - 1 - j] = 1.0 - rank;
+        }
+        if SPINE_K % 2 != 0 {
+            grid[SPINE_K / 2] = 0.5;
+        }
+        grid
     })
 }
 
@@ -1378,13 +1403,16 @@ struct SampleInterpolation {
     fraction: f32,
 }
 
-fn plotting_rank(index: usize, sample_count: usize, link: SpineLink) -> f32 {
+fn plotting_position_adjustment(link: SpineLink) -> f32 {
     match link {
-        SpineLink::Linear => (index + 1) as f32 / (sample_count + 1) as f32,
-        SpineLink::Probit | SpineLink::LogProbit => {
-            (index as f32 + 0.625) / (sample_count as f32 + 0.25)
-        }
+        SpineLink::Linear => 0.0,
+        SpineLink::Probit | SpineLink::LogProbit => 3.0 / 8.0,
     }
+}
+
+fn plotting_rank(index: usize, sample_count: usize, link: SpineLink) -> f32 {
+    let adjustment = plotting_position_adjustment(link);
+    (index as f32 + 1.0 - adjustment) / (sample_count as f32 + 1.0 - 2.0 * adjustment)
 }
 
 fn sample_interpolation(
@@ -1401,10 +1429,8 @@ fn sample_interpolation(
             };
         }
         let q = targets[target_index];
-        let position = match link {
-            SpineLink::Linear => q * (sample_count + 1) as f32 - 1.0,
-            SpineLink::Probit | SpineLink::LogProbit => q * (sample_count as f32 + 0.25) - 0.625,
-        };
+        let adjustment = plotting_position_adjustment(link);
+        let position = q * (sample_count as f32 + 1.0 - 2.0 * adjustment) - (1.0 - adjustment);
         let left = (position.floor() as isize).clamp(0, sample_count as isize - 2) as usize;
         let right = left + 1;
         let x0 = link.rank_coordinate(plotting_rank(left, sample_count, link));
@@ -1601,25 +1627,6 @@ fn quantile_from_query<const LINK: u8>(anchors: &[f32], interpolation: QueryInte
     }
 }
 
-fn quantile_from_axis<const LOG: bool>(
-    anchors: &[f32],
-    q: f32,
-    axis: &[f32; SPINE_K],
-    coordinate: f32,
-) -> f32 {
-    let upper = rank_grid()
-        .partition_point(|&rank| rank < q)
-        .clamp(1, SPINE_K - 1);
-    let lower = upper - 1;
-    let denominator = axis[upper] - axis[lower];
-    if denominator <= 0.0 {
-        anchors[lower]
-    } else {
-        let t = ((coordinate - axis[lower]) / denominator).clamp(0.0, 1.0);
-        unscale_value::<LOG>(cubic_segment::<LOG>(anchors, axis, lower, t).0)
-    }
-}
-
 #[inline(always)]
 fn quantile_from_anchors_for<const LINK: u8>(anchors: &[f32], q: f32) -> f32 {
     if q <= 0.0 {
@@ -1628,13 +1635,7 @@ fn quantile_from_anchors_for<const LINK: u8>(anchors: &[f32], q: f32) -> f32 {
     if q >= 1.0 {
         return anchors[SPINE_K - 1];
     }
-    match LINK {
-        LINEAR_LINK => {
-            quantile_from_query::<LINEAR_LINK>(anchors, query_interpolation::<LINEAR_LINK>(q))
-        }
-        LOG_PROBIT_LINK => quantile_from_axis::<true>(anchors, q, probit_grid(), probit(q)),
-        _ => quantile_from_axis::<false>(anchors, q, probit_grid(), probit(q)),
-    }
+    quantile_from_query::<LINK>(anchors, query_interpolation::<LINK>(q))
 }
 
 #[cfg(test)]
@@ -1742,15 +1743,15 @@ fn interpolate_anchor_cdf(
     value: f32,
     link: SpineLink,
 ) -> f32 {
-    if anchors[right] <= anchors[left] {
-        return rank_grid()[right];
-    }
-    let y0 = link.value_coordinate(anchors[left]);
-    let y1 = link.value_coordinate(anchors[right]);
-    let t = ((link.value_coordinate(value) - y0) / (y1 - y0)).clamp(0.0, 1.0);
-    let axis = link.transformed_grid();
-    let coordinate = axis[left] + t * (axis[right] - axis[left]);
-    link.rank_from_coordinate(coordinate)
+    interpolate_grid_cdf(
+        anchors,
+        rank_grid(),
+        link.transformed_grid(),
+        left,
+        right,
+        value,
+        link,
+    )
 }
 
 fn interpolate_grid_cdf(
@@ -1794,7 +1795,7 @@ fn empirical_reanchor(values: &[f32], targets: &[f32; SPINE_K], output: &mut [f3
 fn blend_reanchor_close_scaled<const LOG: bool>(
     old: &[f32; SPINE_K],
     batch: &[f32],
-    lambda: f32,
+    new_gain: f32,
     targets: &[f32; SPINE_K],
     batch_interpolation: &[SampleInterpolation; SPINE_K],
     output: &mut [f32; SPINE_K],
@@ -1803,12 +1804,12 @@ fn blend_reanchor_close_scaled<const LOG: bool>(
         output.copy_from_slice(old);
         return;
     }
-    if lambda >= 1.0 - f32::EPSILON {
+    if new_gain <= f32::EPSILON {
         output.copy_from_slice(old);
         return;
     }
 
-    let batch_weight = 1.0 - lambda;
+    let history_weight = 1.0 - new_gain;
     let support_min = old[0].min(batch[0]);
     let support_max = old[SPINE_K - 1].max(batch[batch.len() - 1]);
     for (index, &q) in targets.iter().enumerate() {
@@ -1822,10 +1823,10 @@ fn blend_reanchor_close_scaled<const LOG: bool>(
         }
         let batch_value = interpolated_sample_quantile::<LOG>(batch, batch_interpolation[index])
             .clamp(support_min, support_max);
-        output[index] = if lambda <= f32::EPSILON {
+        output[index] = if new_gain >= 1.0 - f32::EPSILON {
             batch_value
         } else {
-            lambda * old[index] + batch_weight * batch_value
+            new_gain.mul_add(batch_value, history_weight * old[index])
         };
     }
     enforce_monotone(output);
@@ -1834,7 +1835,7 @@ fn blend_reanchor_close_scaled<const LOG: bool>(
 fn blend_reanchor_close(
     old: &[f32; SPINE_K],
     batch: &[f32],
-    lambda: f32,
+    new_gain: f32,
     targets: &[f32; SPINE_K],
     batch_interpolation: &[SampleInterpolation; SPINE_K],
     link: SpineLink,
@@ -1844,7 +1845,7 @@ fn blend_reanchor_close(
         SpineLink::LogProbit => blend_reanchor_close_scaled::<true>(
             old,
             batch,
-            lambda,
+            new_gain,
             targets,
             batch_interpolation,
             output,
@@ -1852,7 +1853,7 @@ fn blend_reanchor_close(
         SpineLink::Probit | SpineLink::Linear => blend_reanchor_close_scaled::<false>(
             old,
             batch,
-            lambda,
+            new_gain,
             targets,
             batch_interpolation,
             output,
@@ -1863,7 +1864,7 @@ fn blend_reanchor_close(
 fn blend_reanchor(
     old: &[f32; SPINE_K],
     batch: &[f32],
-    lambda: f32,
+    new_gain: f32,
     targets: &[f32; SPINE_K],
     target_axis: &[f32; SPINE_K],
     link: SpineLink,
@@ -1873,11 +1874,11 @@ fn blend_reanchor(
         output.copy_from_slice(old);
         return;
     }
-    if lambda <= f32::EPSILON {
+    if new_gain >= 1.0 - f32::EPSILON {
         empirical_reanchor(batch, targets, output);
         return;
     }
-    if lambda >= 1.0 - f32::EPSILON {
+    if new_gain <= f32::EPSILON {
         output.copy_from_slice(old);
         return;
     }
@@ -1885,7 +1886,7 @@ fn blend_reanchor(
     // Shift the old ruler and the requested ruler together. Thus a history-only
     // merge is exactly the identity; randomness affects only the interpolation
     // residual instead of introducing a first-order rank random walk.
-    let batch_weight = 1.0 - lambda;
+    let history_weight = 1.0 - new_gain;
     let support_min = old[0].min(batch[0]);
     let support_max = old[SPINE_K - 1].max(batch[batch.len() - 1]);
     let ranks = targets;
@@ -1922,11 +1923,11 @@ fn blend_reanchor(
             )
         };
         let batch_before = batch_index as f32 / batch.len() as f32;
-        let mixture_before = lambda * old_before + batch_weight * batch_before;
+        let mixture_before = history_weight * old_before + new_gain * batch_before;
 
         while target_index < SPINE_K && targets[target_index] <= mixture_before {
-            let old_rank =
-                ((targets[target_index] - batch_weight * batch_before) / lambda).clamp(0.0, 1.0);
+            let old_rank = ((targets[target_index] - new_gain * batch_before) / history_weight)
+                .clamp(0.0, 1.0);
             output[target_index] = quantile_from_grid_cursor(
                 old,
                 ranks,
@@ -1955,7 +1956,7 @@ fn blend_reanchor(
             next_batch += 1;
         }
         let batch_after = next_batch as f32 / batch.len() as f32;
-        let mixture_after = lambda * old_after + batch_weight * batch_after;
+        let mixture_after = history_weight * old_after + new_gain * batch_after;
         while target_index < SPINE_K && targets[target_index] <= mixture_after {
             output[target_index] = event;
             target_index += 1;
@@ -2379,6 +2380,58 @@ mod tests {
     }
 
     #[test]
+    fn rank_grid_is_monotone_and_exactly_symmetric() {
+        let grid = rank_grid();
+        assert_eq!(grid[0], 0.0);
+        assert_eq!(grid[SPINE_K - 1], 1.0);
+        assert!(grid.windows(2).all(|pair| pair[0] < pair[1]));
+        for j in 0..SPINE_K / 2 {
+            assert_eq!(grid[SPINE_K - 1 - j], 1.0 - grid[j]);
+        }
+    }
+
+    #[test]
+    fn unified_plotting_positions_match_named_forms() {
+        let sample_count = 100;
+        for index in 0..sample_count {
+            assert_eq!(
+                plotting_rank(index, sample_count, SpineLink::Linear),
+                (index + 1) as f32 / (sample_count + 1) as f32
+            );
+            let blom = (index as f32 + 0.625) / (sample_count as f32 + 0.25);
+            assert_eq!(plotting_rank(index, sample_count, SpineLink::Probit), blom);
+            assert_eq!(
+                plotting_rank(index, sample_count, SpineLink::LogProbit),
+                blom
+            );
+        }
+    }
+
+    #[test]
+    fn cell_quantiles_match_bulk_queries_for_every_link() {
+        let config = QuantileSpineConfig {
+            link_refit_interval: 0,
+            ..QuantileSpineConfig::default()
+        };
+        let mut spine = QuantileSpine::with_config(&[2], config);
+        for index in 0..1_000 {
+            let value = index as f32 + 1.0;
+            spine.update(&[value, 2.0 * value + 1.0]);
+        }
+        let qs = [0.001, 0.1, 0.5, 0.9, 0.999];
+        for link in [SpineLink::Linear, SpineLink::Probit, SpineLink::LogProbit] {
+            spine.link = link;
+            let bulk = spine.quantiles(&qs);
+            for position in 0..spine.numel() {
+                let cell = spine.cell_quantiles(position, &qs);
+                for (q_index, &value) in cell.iter().enumerate() {
+                    assert_eq!(value, bulk[q_index][position]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn simd_sort_matches_scalar_sort_with_remainder() {
         const NUMEL: usize = 11;
         const BATCH: usize = 13;
@@ -2435,7 +2488,7 @@ mod tests {
         blend_reanchor(
             &old,
             &batch,
-            0.7,
+            0.3,
             &targets,
             &targets.map(probit),
             SpineLink::Probit,
