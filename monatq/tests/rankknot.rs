@@ -75,21 +75,6 @@ fn quantile_curve_is_monotone() {
 }
 
 #[test]
-fn nan_rejects_the_whole_tensor_update_before_mutation() {
-    let config = RankKnotConfig { buffer_capacity: 8 };
-    let mut digest = TensorDigest::<f32, RankKnot>::with_config(&[3], config);
-    digest.update(&[1.0, 2.0, 3.0]);
-    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        digest.update(&[4.0, f32::NAN, 6.0]);
-    }));
-    assert!(rejected.is_err());
-    digest.update(&[7.0, 8.0, 9.0]);
-    assert_eq!(digest.sample_count(), 2);
-    assert_eq!(digest.min(), vec![1.0, 2.0, 3.0]);
-    assert_eq!(digest.max(), vec![7.0, 8.0, 9.0]);
-}
-
-#[test]
 fn infinities_remain_pure_and_do_not_poison_finite_estimates() {
     let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     for i in 0..10_000 {

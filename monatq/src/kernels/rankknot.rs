@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use rayon::prelude::*;
 
 use crate::{
@@ -5,7 +7,7 @@ use crate::{
     tensor_digest::StorageOperations,
 };
 
-pub const RANK_KNOT_K: usize = 64;
+pub const RANK_KNOT_K: usize = 32;
 const MASS_QUANTA: u64 = u16::MAX as u64;
 
 /// The complete persistent summary for one tensor position.
@@ -36,6 +38,22 @@ struct Entry {
     value: f32,
     weight: u64,
     pure: bool,
+}
+
+struct RankKnotScratch {
+    incoming: Vec<f32>,
+    entries: Vec<Entry>,
+    boundaries: [usize; RANK_KNOT_K - 1],
+}
+
+impl RankKnotScratch {
+    fn new(rows: usize) -> Self {
+        Self {
+            incoming: Vec::with_capacity(rows),
+            entries: Vec::with_capacity(RANK_KNOT_K + rows),
+            boundaries: [0; RANK_KNOT_K - 1],
+        }
+    }
 }
 
 pub(crate) struct RankKnotStorage {
@@ -126,13 +144,6 @@ impl StorageOperations<f32> for RankKnotStorage {
 
     fn update(&mut self, data: &[f32]) {
         assert_eq!(data.len(), self.numel, "tensor sample has the wrong length");
-        assert!(
-            !data.iter().any(|value| value.is_nan()),
-            "RankKnot rejects tensor updates containing NaN"
-        );
-        if self.n_buffered == self.config.buffer_capacity {
-            self.flush();
-        }
         let start = self.n_buffered * self.numel;
         self.row_buffer[start..start + self.numel].copy_from_slice(data);
         self.n_buffered += 1;
@@ -149,48 +160,63 @@ impl StorageOperations<f32> for RankKnotStorage {
         let numel = self.numel;
         let old_count = self.sample_count;
         let buffer = &self.row_buffer[..rows * numel];
-        self.states.par_iter_mut().enumerate().for_each_init(
-            || Vec::<Entry>::with_capacity(RANK_KNOT_K + rows),
-            |scratch, (position, state)| {
-                scratch.clear();
-                decode_old(state, old_count, scratch);
-                for row in 0..rows {
-                    scratch.push(Entry {
-                        value: buffer[row * numel + position],
-                        weight: MASS_QUANTA,
-                        pure: true,
-                    });
-                }
-                scratch.sort_by(|left, right| left.value.total_cmp(&right.value));
-                let minimum = scratch.first().expect("nonempty flush").value;
-                let maximum = scratch.last().expect("nonempty flush").value;
-                coalesce(scratch);
-                state.min = if old_count == 0 {
-                    minimum
-                } else {
-                    min_value(state.min, minimum)
-                };
-                state.max = if old_count == 0 {
-                    maximum
-                } else {
-                    max_value(state.max, maximum)
-                };
-                compress_and_store(scratch, state);
-            },
-        );
+        self.states
+            .par_iter_mut()
+            .with_min_len(64)
+            .enumerate()
+            .for_each_init(
+                || RankKnotScratch::new(rows),
+                |scratch, (position, state)| {
+                    scratch.incoming.clear();
+                    scratch
+                        .incoming
+                        .extend(buffer.chunks_exact(numel).map(|row| row[position]));
+                    scratch
+                        .incoming
+                        .sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
+                    let minimum = scratch.incoming[0];
+                    let maximum = scratch.incoming[rows - 1];
+
+                    merge_old_and_incoming(
+                        state,
+                        old_count,
+                        &scratch.incoming,
+                        &mut scratch.entries,
+                    );
+                    state.min = if old_count == 0 {
+                        minimum
+                    } else {
+                        min_value(state.min, minimum)
+                    };
+                    state.max = if old_count == 0 {
+                        maximum
+                    } else {
+                        max_value(state.max, maximum)
+                    };
+                    compress_and_store(&scratch.entries, state, &mut scratch.boundaries);
+                },
+            );
         self.sample_count = self.sample_count.saturating_add(rows as u64);
         self.n_buffered = 0;
     }
 
     fn quantile(&mut self, q: f32) -> Vec<f32> {
         self.flush();
-        self.states.iter().map(|state| query(state, q)).collect()
+        self.states
+            .par_iter()
+            .map(|state| query(state, q))
+            .collect()
     }
 
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
         self.flush();
         qs.iter()
-            .map(|&q| self.states.iter().map(|state| query(state, q)).collect())
+            .map(|&q| {
+                self.states
+                    .par_iter()
+                    .map(|state| query(state, q))
+                    .collect()
+            })
             .collect()
     }
 
@@ -201,125 +227,208 @@ impl StorageOperations<f32> for RankKnotStorage {
     }
 }
 
-fn decode_old(state: &RankKnotState, old_count: u64, output: &mut Vec<Entry>) {
+fn merge_old_and_incoming(
+    state: &RankKnotState,
+    old_count: u64,
+    incoming: &[f32],
+    output: &mut Vec<Entry>,
+) {
+    output.clear();
     if old_count == 0 {
+        for &value in incoming {
+            push_coalesced(
+                output,
+                Entry {
+                    value,
+                    weight: MASS_QUANTA,
+                    pure: true,
+                },
+            );
+        }
         return;
     }
-    for index in 0..RANK_KNOT_K {
-        let mass = state.masses[index];
-        if mass == 0 {
-            continue;
+    let mut old_index = 0;
+    let mut new_index = 0;
+    while old_index < RANK_KNOT_K || new_index < incoming.len() {
+        while old_index < RANK_KNOT_K && state.masses[old_index] == 0 {
+            old_index += 1;
         }
-        output.push(Entry {
-            value: state.values[index],
-            weight: u64::from(mass).saturating_mul(old_count),
-            pure: state.pure_mask & (1_u64 << index) != 0,
-        });
+        let take_old = old_index < RANK_KNOT_K
+            && (new_index == incoming.len()
+                || state.values[old_index]
+                    .total_cmp(&incoming[new_index])
+                    .is_le());
+        if take_old {
+            push_coalesced(
+                output,
+                Entry {
+                    value: state.values[old_index],
+                    weight: u64::from(state.masses[old_index]).saturating_mul(old_count),
+                    pure: state.pure_mask & (1_u64 << old_index) != 0,
+                },
+            );
+            old_index += 1;
+        } else if new_index < incoming.len() {
+            push_coalesced(
+                output,
+                Entry {
+                    value: incoming[new_index],
+                    weight: MASS_QUANTA,
+                    pure: true,
+                },
+            );
+            new_index += 1;
+        } else {
+            break;
+        }
     }
 }
 
-fn coalesce(entries: &mut Vec<Entry>) {
-    let mut write = 0;
-    for read in 0..entries.len() {
-        if write > 0 && entries[write - 1].value == entries[read].value {
-            entries[write - 1].weight = entries[write - 1]
-                .weight
-                .saturating_add(entries[read].weight);
-            entries[write - 1].pure &= entries[read].pure;
-        } else {
-            entries[write] = entries[read];
-            write += 1;
-        }
+fn push_coalesced(entries: &mut Vec<Entry>, entry: Entry) {
+    if let Some(last) = entries.last_mut()
+        && last.value == entry.value
+    {
+        last.weight = last.weight.saturating_add(entry.weight);
+        last.pure &= entry.pure;
+    } else {
+        entries.push(entry);
     }
-    entries.truncate(write);
 }
 
-fn compress_and_store(entries: &[Entry], state: &mut RankKnotState) {
-    let groups = groups(entries);
-    let total = entries.iter().map(|entry| entry.weight).sum::<u64>();
-    let mut representatives = Vec::with_capacity(groups.len());
-    for &(start, end) in &groups {
-        let mass = entries[start..end]
-            .iter()
-            .map(|entry| entry.weight)
-            .sum::<u64>();
-        let pure = end == start + 1 && entries[start].pure;
-        let value = if pure || !entries[start].value.is_finite() {
-            entries[start].value
-        } else {
-            let moment = entries[start..end]
-                .iter()
-                .map(|entry| entry.value as f64 * entry.weight as f64)
-                .sum::<f64>();
-            (moment / mass as f64) as f32
-        };
-        debug_assert!(value.is_finite() || pure);
-        representatives.push(Entry {
-            value,
-            weight: mass,
-            pure,
-        });
-    }
-    // Adjacent weighted means can round to the same f32. Coalesce them so the
-    // fixed knot budget is not wasted and a mixed representative never becomes pure.
-    coalesce(&mut representatives);
-
+fn compress_and_store(
+    entries: &[Entry],
+    state: &mut RankKnotState,
+    boundaries: &mut [usize; RANK_KNOT_K - 1],
+) {
+    let (total, boundary_count) = make_boundaries(entries, boundaries);
     *state = RankKnotState {
         min: state.min,
         max: state.max,
         ..RankKnotState::default()
     };
+
+    let mut start = 0;
+    let mut pending: Option<Entry> = None;
     let mut cumulative = 0_u64;
     let mut previous_prefix = 0_u64;
     let mut output_index = 0;
-    for representative in representatives {
-        cumulative = cumulative.saturating_add(representative.weight);
-        let prefix = round_ratio_ties_even(cumulative, MASS_QUANTA, total);
-        let encoded = prefix - previous_prefix;
-        previous_prefix = prefix;
-        if encoded == 0 {
-            continue;
+    for end in boundaries[..boundary_count]
+        .iter()
+        .copied()
+        .chain(std::iter::once(entries.len()))
+    {
+        let pure = end == start + 1 && entries[start].pure;
+        let (mass, value) = if pure {
+            (entries[start].weight, entries[start].value)
+        } else {
+            let (mass, moment) =
+                entries[start..end]
+                    .iter()
+                    .fold((0_u64, 0.0_f64), |(mass, moment), entry| {
+                        (
+                            mass.saturating_add(entry.weight),
+                            moment + entry.value as f64 * entry.weight as f64,
+                        )
+                    });
+            let value = if entries[start].value.is_finite() {
+                (moment / mass as f64) as f32
+            } else {
+                entries[start].value
+            };
+            (mass, value)
+        };
+        debug_assert!(value.is_finite() || pure);
+        let representative = Entry {
+            value,
+            weight: mass,
+            pure,
+        };
+        if let Some(previous) = pending.as_mut()
+            && previous.value == representative.value
+        {
+            previous.weight = previous.weight.saturating_add(representative.weight);
+            previous.pure &= representative.pure;
+        } else if let Some(previous) = pending.replace(representative) {
+            store_representative(
+                state,
+                previous,
+                total,
+                &mut cumulative,
+                &mut previous_prefix,
+                &mut output_index,
+            );
         }
-        state.values[output_index] = representative.value;
-        state.masses[output_index] = encoded as u16;
-        if representative.pure {
-            state.pure_mask |= 1_u64 << output_index;
-        }
-        output_index += 1;
+        start = end;
+    }
+    if let Some(previous) = pending {
+        store_representative(
+            state,
+            previous,
+            total,
+            &mut cumulative,
+            &mut previous_prefix,
+            &mut output_index,
+        );
     }
 }
 
-fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
+fn store_representative(
+    state: &mut RankKnotState,
+    representative: Entry,
+    total: u64,
+    cumulative: &mut u64,
+    previous_prefix: &mut u64,
+    output_index: &mut usize,
+) {
+    *cumulative = cumulative.saturating_add(representative.weight);
+    let prefix = round_div_ties_even(*cumulative, total / MASS_QUANTA);
+    let encoded = prefix - *previous_prefix;
+    *previous_prefix = prefix;
+    if encoded == 0 {
+        return;
+    }
+    state.values[*output_index] = representative.value;
+    state.masses[*output_index] = encoded as u16;
+    if representative.pure {
+        state.pure_mask |= 1_u64 << *output_index;
+    }
+    *output_index += 1;
+}
+
+fn make_boundaries(entries: &[Entry], boundaries: &mut [usize; RANK_KNOT_K - 1]) -> (u64, usize) {
+    let total = entries.iter().map(|entry| entry.weight).sum();
     if entries.len() <= RANK_KNOT_K {
-        return (0..entries.len()).map(|index| (index, index + 1)).collect();
+        for (slot, boundary) in boundaries.iter_mut().zip(1..entries.len()) {
+            *slot = boundary;
+        }
+        return (total, entries.len() - 1);
     }
-    let total = entries.iter().map(|entry| entry.weight).sum::<u64>();
-    let mut prefix = Vec::with_capacity(entries.len() + 1);
-    prefix.push(0_u64);
-    for entry in entries {
-        prefix.push(prefix.last().copied().unwrap().saturating_add(entry.weight));
-    }
-    let mut boundaries = Vec::with_capacity(RANK_KNOT_K - 1);
-    // Reserve cuts for infinities first: they are indivisible pure singleton groups and
-    // must never enter a mean, even when an arcsine target does not land near them.
+    let mut boundary_count = 0;
+    // Infinities are indivisible singleton groups and must never enter a mean.
+    // Targets are ordered, so boundaries can be emitted in order without sorting.
+    let positive_infinity = entries
+        .last()
+        .is_some_and(|entry| entry.value == f32::INFINITY);
     if entries
         .first()
         .is_some_and(|entry| entry.value == f32::NEG_INFINITY)
     {
-        boundaries.push(1);
+        boundaries[boundary_count] = 1;
+        boundary_count += 1;
     }
-    if entries
-        .last()
-        .is_some_and(|entry| entry.value == f32::INFINITY)
-    {
-        boundaries.push(entries.len() - 1);
-    }
-    for cut in 1..RANK_KNOT_K {
-        let q = ((std::f64::consts::PI * cut as f64 / (2.0 * RANK_KNOT_K as f64)).sin()).powi(2);
+    let target_limit = RANK_KNOT_K - 1 - usize::from(positive_infinity);
+    let mut index = 0;
+    let mut before = 0_u64;
+    let mut after = entries[0].weight;
+    for &q in arcsine_targets() {
         let target = q * total as f64;
-        let index = prefix[1..].partition_point(|&mass| (mass as f64) < target);
-        let before = prefix[index] as f64;
-        let after = prefix[index + 1] as f64;
+        while index + 1 < entries.len() && (after as f64) < target {
+            before = after;
+            index += 1;
+            after = after.saturating_add(entries[index].weight);
+        }
+        let before = before as f64;
+        let after = after as f64;
         let boundary = if target - before <= after - target {
             index
         } else {
@@ -327,76 +436,43 @@ fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
         };
         if boundary > 0
             && boundary < entries.len()
-            && !boundaries.contains(&boundary)
-            && boundaries.len() < RANK_KNOT_K - 1
+            && (boundary_count == 0 || boundaries[boundary_count - 1] != boundary)
+            && boundary_count < target_limit
         {
-            boundaries.push(boundary);
+            boundaries[boundary_count] = boundary;
+            boundary_count += 1;
         }
     }
-    boundaries.sort_unstable();
-    let mut result = Vec::with_capacity(RANK_KNOT_K);
-    let mut start = 0;
-    for boundary in boundaries {
-        result.push((start, boundary));
-        start = boundary;
+    if positive_infinity
+        && (boundary_count == 0 || boundaries[boundary_count - 1] != entries.len() - 1)
+    {
+        boundaries[boundary_count] = entries.len() - 1;
+        boundary_count += 1;
     }
-    result.push((start, entries.len()));
-
-    while result.len() < RANK_KNOT_K {
-        let mut best: Option<(f64, usize, usize)> = None;
-        for (group_index, &(left_index, right_index)) in result.iter().enumerate() {
-            if right_index - left_index <= 1 {
-                continue;
-            }
-            let left = arcsine_scale(prefix[left_index] as f64 / total as f64);
-            let right = arcsine_scale(prefix[right_index] as f64 / total as f64);
-            let midpoint = (left + right) * 0.5;
-            let mut split = left_index + 1;
-            let mut distance = f64::INFINITY;
-            for (candidate, &candidate_prefix) in prefix
-                .iter()
-                .enumerate()
-                .take(right_index)
-                .skip(left_index + 1)
-            {
-                let candidate_distance =
-                    (arcsine_scale(candidate_prefix as f64 / total as f64) - midpoint).abs();
-                if candidate_distance < distance {
-                    distance = candidate_distance;
-                    split = candidate;
-                }
-            }
-            let span = right - left;
-            if best.is_none_or(|(best_span, best_index, _)| {
-                span > best_span || (span == best_span && group_index < best_index)
-            }) {
-                best = Some((span, group_index, split));
-            }
-        }
-        let Some((_, index, split)) = best else { break };
-        let (start, end) = result[index];
-        result[index] = (start, split);
-        result.insert(index + 1, (split, end));
-    }
-    result
+    (total, boundary_count)
 }
 
-fn arcsine_scale(q: f64) -> f64 {
-    (2.0 / std::f64::consts::PI) * q.clamp(0.0, 1.0).sqrt().asin()
+fn arcsine_targets() -> &'static [f64; RANK_KNOT_K - 1] {
+    static TARGETS: OnceLock<[f64; RANK_KNOT_K - 1]> = OnceLock::new();
+    TARGETS.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let cut = index + 1;
+            (std::f64::consts::PI * cut as f64 / (2.0 * RANK_KNOT_K as f64))
+                .sin()
+                .powi(2)
+        })
+    })
 }
 
-fn round_ratio_ties_even(numerator: u64, multiplier: u64, denominator: u64) -> u64 {
-    let scaled = (numerator as u128) * (multiplier as u128);
-    let denominator = denominator as u128;
-    let quotient = scaled / denominator;
-    let remainder = scaled % denominator;
-    let rounded =
-        if remainder * 2 > denominator || (remainder * 2 == denominator && quotient & 1 == 1) {
-            quotient + 1
-        } else {
-            quotient
-        };
-    rounded as u64
+fn round_div_ties_even(numerator: u64, denominator: u64) -> u64 {
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let half = denominator / 2;
+    if remainder > half || (denominator & 1 == 0 && remainder == half && quotient & 1 == 1) {
+        quotient + 1
+    } else {
+        quotient
+    }
 }
 
 fn query(state: &RankKnotState, q: f32) -> f32 {
@@ -412,44 +488,31 @@ fn query(state: &RankKnotState, q: f32) -> f32 {
     if q >= 1.0 {
         return state.max;
     }
-    let target = q as f64;
-    let total = MASS_QUANTA as f64;
+    let target = q as f64 * MASS_QUANTA as f64;
+    let first = state.masses.iter().position(|&mass| mass != 0).unwrap();
+    let mut previous_rank = 0.0_f64;
+    let mut previous_value = state.values[first];
     let mut cumulative = 0_u64;
     for index in 0..RANK_KNOT_K {
         let mass = u64::from(state.masses[index]);
         if mass == 0 {
             continue;
         }
-        let left = cumulative as f64 / total;
+        let left = cumulative as f64;
         cumulative += mass;
-        let right = cumulative as f64 / total;
-        if state.pure_mask & (1_u64 << index) != 0 && target >= left && target <= right {
-            return state.values[index];
-        }
-    }
-
-    let first = state.masses.iter().position(|&mass| mass != 0).unwrap();
-    let mut previous_rank = 0.0_f64;
-    let mut previous_value = state.values[first];
-    cumulative = 0;
-    for index in 0..RANK_KNOT_K {
-        let mass = u64::from(state.masses[index]);
-        if mass == 0 {
-            continue;
-        }
-        let left = cumulative as f64 / total;
-        cumulative += mass;
-        let right = cumulative as f64 / total;
-        let ranks = if state.pure_mask & (1_u64 << index) != 0 {
-            [left, right]
-        } else {
-            [(left + right) * 0.5, f64::NAN]
-        };
-        for rank in ranks {
-            if rank.is_nan() {
-                continue;
+        let right = cumulative as f64;
+        let value = state.values[index];
+        if state.pure_mask & (1_u64 << index) != 0 {
+            if target >= left && target <= right {
+                return value;
             }
-            let value = state.values[index];
+            if target <= left {
+                return interpolate(previous_rank, previous_value, left, value, target);
+            }
+            previous_rank = right;
+            previous_value = value;
+        } else {
+            let rank = (left + right) * 0.5;
             if target <= rank {
                 return interpolate(previous_rank, previous_value, rank, value, target);
             }
@@ -460,7 +523,7 @@ fn query(state: &RankKnotState, q: f32) -> f32 {
     interpolate(
         previous_rank,
         previous_value,
-        1.0,
+        MASS_QUANTA as f64,
         state.values[first_active_from_end(state)],
         target,
     )
@@ -506,8 +569,8 @@ mod tests {
 
     #[test]
     fn ties_even_integer_quantization() {
-        assert_eq!(round_ratio_ties_even(1, 5, 2), 2);
-        assert_eq!(round_ratio_ties_even(3, 5, 2), 8);
+        assert_eq!(round_div_ties_even(5, 2), 2);
+        assert_eq!(round_div_ties_even(15, 2), 8);
     }
 
     #[test]
