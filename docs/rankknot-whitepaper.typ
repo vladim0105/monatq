@@ -20,13 +20,13 @@
       #set text(size: 8pt, fill: muted)
       RankKnot · compact tensor histories for deferred analysis
       #h(1fr)
-      Research note · version 0.3
+      Research note · version 0.4
     ]
   },
   footer: context {
     if counter(page).get().first() > 1 [
       #set text(size: 8pt, fill: muted)
-      Compact observation proposal — Rust throughput remains unmeasured
+      Current K32 Rust backend · historical K64 feasibility evidence
       #h(1fr)
       #counter(page).display("1")
     ]
@@ -102,7 +102,7 @@
   for x in (2.8, 3.05, 3.2) { circle((x, 2.8), radius: .11, fill: red, stroke: none) }
   line((3.55, 2.0), (4.65, 2.0), mark: (end: ">"), stroke: 1.2pt + navy)
   rect((4.9, .45), (8.4, 3.55), radius: .15, fill: white, stroke: .8pt + gridline)
-  content((6.65, 3.2), text(weight: "bold", fill: navy)[400-byte state])
+  content((6.65, 3.2), text(weight: "bold", fill: navy)[208-byte state])
   for i in range(0, 12) {
     let x = 5.15 + i * .25
     let y = .8 + 1.6 * calc.sin((i + 2) * .55) * calc.sin((i + 2) * .55)
@@ -175,7 +175,7 @@
     circle((x, y), radius: .045, fill: blue.lighten(20%), stroke: none)
   }
   line((4.45, 1.55), (5.45, 1.55), mark: (end: ">"), stroke: 1.2pt + navy)
-  content((7.65, 3.15), text(size: 7.5pt, weight: "bold", fill: navy)[64 weighted knots])
+  content((7.65, 3.15), text(size: 7.5pt, weight: "bold", fill: navy)[up to 32 weighted knots])
   for item in ((5.9, .8, .11), (6.5, 1.1, .18), (7.2, 1.55, .26), (8.0, 1.8, .30), (8.8, 1.25, .20), (9.4, .75, .12)) {
     circle((item.at(0), item.at(1)), radius: item.at(2), fill: orange.lighten(15%), stroke: .6pt + orange)
     line((item.at(0), .3), (item.at(0), item.at(1) - item.at(2)), stroke: .5pt + orange.lighten(40%))
@@ -185,16 +185,16 @@
 
 #let memory-art = cetz.canvas(length: 0.68cm, {
   import cetz.draw: *
-  rect((.4, .8), (6.15, 2.1), fill: blue.lighten(82%), stroke: .8pt + blue)
-  rect((6.15, .8), (9.05, 2.1), fill: orange.lighten(78%), stroke: .8pt + orange)
-  rect((9.05, .8), (9.6, 2.1), fill: green.lighten(76%), stroke: .8pt + green)
-  rect((9.6, .8), (10.15, 2.1), fill: purple.lighten(78%), stroke: .8pt + purple)
-  content((3.25, 1.45), text(size: 8pt, weight: "bold")[64 values · 256 B])
-  content((7.6, 1.45), text(size: 8pt, weight: "bold")[64 masses · 128 B])
-  content((9.325, 2.55), text(size: 7pt, fill: green)[tie bits])
-  content((9.875, .35), text(size: 7pt, fill: purple)[min/max])
-  line((9.325, 2.05), (9.325, 2.35), stroke: .7pt + green)
-  line((9.875, .55), (9.875, .8), stroke: .7pt + purple)
+  rect((.4, .8), (6.4, 2.1), fill: blue.lighten(82%), stroke: .8pt + blue)
+  rect((6.4, .8), (9.4, 2.1), fill: orange.lighten(78%), stroke: .8pt + orange)
+  rect((9.4, .8), (9.775, 2.1), fill: green.lighten(76%), stroke: .8pt + green)
+  rect((9.775, .8), (10.15, 2.1), fill: purple.lighten(78%), stroke: .8pt + purple)
+  content((3.4, 1.45), text(size: 8pt, weight: "bold")[32 values · 128 B])
+  content((7.9, 1.45), text(size: 8pt, weight: "bold")[32 masses · 64 B])
+  content((9.5875, 2.55), text(size: 7pt, fill: green)[tie bits])
+  content((9.9625, .35), text(size: 7pt, fill: purple)[min/max])
+  line((9.5875, 2.05), (9.5875, 2.35), stroke: .7pt + green)
+  line((9.9625, .55), (9.9625, .8), stroke: .7pt + purple)
 })
 
 #let rank-art = cetz.canvas(length: 0.68cm, {
@@ -326,7 +326,7 @@
     rect((1.95, y + .08), (1.95 + a * .65, y + .34), fill: orange, stroke: none)
     rect((1.95, y - .25), (1.95 + b * .65, y + .01), fill: blue, stroke: none)
   }
-  content((7.4, .45), text(size: 7pt, fill: orange)[RankKnot])
+  content((7.4, .45), text(size: 7pt, fill: orange)[K64 prototype])
   content((8.7, .45), text(size: 7pt, fill: blue)[t-digest])
   content((5.7, 3.75), text(size: 7pt, fill: muted)[mean rank error × 10³])
 })
@@ -335,7 +335,7 @@
   #v(0.20in)
   #text(size: 33pt, weight: "bold", fill: navy)[RankKnot]
   #v(0.10in)
-  #text(size: 17pt, weight: "bold")[A 400-Byte Persistent Rank Summary]
+  #text(size: 17pt, weight: "bold")[A 208-Byte In-Memory Rank Summary]
   #text(size: 17pt, weight: "bold")[for Deferred Tensor Analysis]
   #v(0.15in)
   #text(size: 11.5pt, fill: muted)[Observe every sample now; choose quantiles, groups, diagnostics, and quantization later]
@@ -345,50 +345,49 @@
   #pill([exact ties], tone: green) #h(5pt)
   #pill([cold decisions], tone: purple)
   #v(0.24in)
-  #text(size: 9.5pt)[monatq research note · version 0.3]
+  #text(size: 9.5pt)[monatq implementation note · version 0.4]
 ]
 
 #v(0.25in)
 #hero
 #v(0.18in)
-#callout([The proposal], [Replace the current per-position t-digest with one deterministic weighted approximation of the empirical tensor history. Sixty-four value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 400 bytes of summary state per position. The live collector also needs an input buffer and bounded flush workspace. Collection commits to no percentile, grouping, visualization, or quantizer; those decisions remain cold and revisable.], tone: orange)
+#callout([The current implementation], [`TensorDigest<f32, RankKnot>` is an optional statically selected kernel. Thirty-two value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 208 bytes of state per position. The live collector also uses a 256-row input buffer by default and worker-local flush scratch. The generic API includes merge, analysis, zero-filtering, serialization, and optional visualization methods, but RankKnot’s implementations are explicit stubs that panic; direct support access and quantization remain future work.], tone: orange)
 
 #v(0.12in)
-#callout([An important wording distinction], [RankKnot *ingests every observation*, but it does not retain every raw value. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples cannot be reconstructed or replayed.], tone: red)
+#callout([An important wording distinction], [RankKnot incorporates every supported observation that reaches a successful flush, but it does not retain raw values afterward. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples, their temporal order, and cross-position relationships cannot be reconstructed. NaN input is unsupported and currently fails during flush rather than being rejected atomically by `update`.], tone: red)
 
 #pagebreak()
 #outline(title: [Contents], depth: 2, indent: auto)
 
 = Executive summary
 
-`TensorDigest` receives a sequence of full tensor samples and tracks one distribution at every flat tensor position. The expensive part is not an individual value; it is the product of positions, samples, and persistent bytes. At collection time, callers often do not yet know which summaries they will need. They may later ask for robust ranges, percentiles, per-channel groups, visualizations, outlier diagnostics, or post-training quantization (PTQ) thresholds.
+`TensorDigest` receives full tensor samples and tracks one distribution at every flat tensor position. `TensorDigest<f32, RankKnot>` is now an implemented, statically selected backend optimized for update throughput and compact state. It buffers complete samples, compresses each position independently in parallel, and exposes per-position quantiles and exact extrema.
 
-RankKnot separates *observation* from *decision*. During collection it maintains a compact positive approximation of each position’s empirical distribution. During a cold later stage it can answer quantiles, combine arbitrary positions into groups, evaluate range policies, or serve as input to a quantizer. Query and aggregation latency are explicitly secondary; update throughput and memory dominate.
+RankKnot separates *observation* from *decision*, but today it covers only recording and rank queries. Generic `TensorDigest` methods provide construction, shape, weight, update, flush, quantile, merge, analysis, zero filtering, serialization, and optional visualization operations; RankKnot adds sample count, configuration, and tensor/cell extrema. Its unsupported generic operations currently panic as unimplemented. Direct knot access, working grouping, persistence, visualization, analysis, and PTQ search remain design directions.
 
-#figure(ptq-flow, caption: [The intended scope. Every tensor observation updates the same compact state. Later consumers can choose their own grouping and decision policy without replaying the tensor stream.])
+#figure(ptq-flow, caption: [The current recorder. Every supported tensor observation updates the same compact state. Quantiles and extrema are available now; richer cold consumers require future APIs.])
 
-The proposed summary state uses 400 bytes per tensor position—roughly one twelfth of the repository t-digest’s 4,900-byte summary state at the default compression. It is 32 bytes, or 8.7%, larger than Quantile Spine’s 368-byte summary state. It contains no dynamic histogram, separately sized atom table, per-position heap allocation, or query-time cache. Equal values share the ordinary knot budget, and exact finite extrema remain available even though interior observations are compressed.
+The K32 state uses 208 bytes per tensor position: 32 `f32` values, 32 `u16` masses, a 64-bit purity mask, and two `f32` extrema. This is about one twenty-fourth of the repository t-digest’s 4,900-byte summary state and 160 bytes smaller than Quantile Spine’s 368-byte state. Equal values share the ordinary knot budget, and extrema remain exact even though interior observations are compressed.
 
-#callout([Memory scope], [The 400-byte figure is summary state, not complete live memory. With `f32` inputs, the proposed 256-row buffer adds 1,024 bytes per position. The previous comparison of 400 bytes against the t-digest’s complete 5.7 KiB allocation mixed those scopes and overstated the reduction.], tone: red)
+#callout([Memory scope], [The 208-byte figure is summary state, not complete live memory. With `f32` inputs, the default 256-row buffer adds 1,024 bytes per position, for approximately 1,232 tensor-scaled retained bytes per position. Worker-local vectors and object headers add a small non-tensor-scaled overhead and appear in peak allocator measurements.], tone: red)
 
 #table(
   columns: (1.55fr, 1fr, 1fr, 1fr),
   align: (left, center, center, center),
-  table.header([*Property*], [*t-digest*], [*Quantile Spine*], [*RankKnot*]),
-  [Summary state/position], [4,900 B], [368 B], [400 B],
+  table.header([*Property*], [*t-digest*], [*Quantile Spine*], [*RankKnot K32*]),
+  [Summary state/position], [4,900 B], [368 B], [208 B],
   [`f32` input buffer/position], [800 B], [1,024 B], [1,024 B],
-  [Full sort buffer/position], [none], [1,024 B], [none proposed],
-  [Tensor-scaled live total], [≈ 5,700 B], [2,416 B], [1,424 B],
-  [State primitive], [weighted centroids], [rank anchors], [weighted rank knots],
-  [Repeated values], [interpolated], [anchor dependent], [retained tie interval],
-  [Exact min/max], [implementation dependent], [no], [yes, by construction],
-  [Update], [buffer + centroid merge], [buffer + anchor blend], [buffer + fixed-array rebin],
-  [Cold group merge], [centroid merge], [not available], [union + same rebin],
+  [Additional tensor sort buffer], [none], [1,024 B], [none],
+  [Approx. tensor-scaled retained total], [5,700 B], [2,416 B], [1,232 B],
+  [State primitive], [weighted centroids], [rank anchors], [up to 32 weighted knots],
+  [Repeated values], [interpolated], [anchor dependent], [retained pure interval],
+  [Exact min/max], [yes], [yes], [yes],
+  [Public `merge_*` contract], [implemented], [stub: panics], [stub: panics],
 )
 
-The table assumes default configurations, `f32`, a 64-bit target, and large tensors over which object headers and worker-local scratch amortize. The implemented t-digest, Quantile Spine, and RankKnot live totals are verified from allocator-instrumented `backend_accuracy` runs rather than field-size estimates. RankKnot’s 1,424-byte tensor-scaled live total uses gathering and sorting in per-worker scratch rather than materializing a second tensor-sized buffer. Adding such a buffer would raise it to 2,448 bytes, slightly above the current Quantile Spine total. Conversely, Quantile Spine could adopt the same worker-local strategy and reach about 1,392 bytes. The live-memory difference between those two designs is therefore an implementation choice, not an inherent RankKnot advantage.
+The table assumes default configurations, `f32`, and a 64-bit target. Allocator instrumentation over 32 positions measured RankKnot at 39,432 live bytes and 45,064 peak bytes, versus 182,408 live bytes for t-digest and 77,320 for Quantile Spine. The component totals explain the scaling; exact allocator totals also include shape vectors, headers, and worker scratch.
 
-#callout([Evidence status], [Held-out Python experiments show better aggregate rank accuracy than the repository t-digest on smooth, atomic, quantized, and bimodal workloads. The 16-bit state transition and `f32` representatives are simulated. Rust throughput, million-row drift, and downstream application quality remain unmeasured.], tone: green)
+#callout([Evidence status], [Current Rust K32 accuracy and memory are measured by `backend_accuracy`, and the repository benchmark exercises update throughput. A local Apple M4 run is reported below. The broader checked-in Python study remains historical K64 feasibility evidence, not a measurement of the current K32 backend. Million-row drift and downstream application quality remain open.], tone: green)
 
 = Observe now, decide later
 
@@ -396,16 +395,11 @@ The table assumes default configurations, `f32`, a 64-bit target, and large tens
 
 A minimum and maximum preserve endpoints but reveal nothing about how probability is distributed between them. A fixed histogram commits to bin edges before the eventual query is known. A single percentile commits to one tail policy. A preselected channel grouping prevents later comparison with per-tensor or hardware-aligned alternatives.
 
-RankKnot instead records a reusable approximation of rank mass. The same collected state can support several later consumers:
+RankKnot instead records a reusable approximation of rank mass. The current API supports medians, arbitrary quantiles, percentile bands assembled by the caller, and exact per-position extrema. The encoded representation could also support grouping, distribution plots, saturation diagnostics, alert thresholds, and PTQ clipping if dedicated consumers or public state access are added.
 
-- median, percentile bands, and robust ranges;
-- per-position, per-channel, per-token, or whole-tensor aggregation;
-- distribution plots and saturation diagnostics;
-- anomaly or alert thresholds chosen after collection;
-- PTQ clipping and scale selection;
-- comparisons between alternative policies without replaying the model or data source.
+#callout([API status], [One generic `TensorDigest` contract now includes merge, analysis, zero filtering, serialization, and optional visualization. T-digest implements those operations; RankKnot and Quantile Spine expose them through explicit `unimplemented!` stubs that panic. RankKnot state remains crate-private, and callers cannot enumerate knots or hand weighted support directly to a quantizer.], tone: purple)
 
-The architecture is therefore closer to a compact tensor history than to a quantizer. PTQ is an important consumer, not the identity of the backend.
+The architecture is closer to a compact tensor history than to a quantizer, but today only its per-position rank-query surface is implemented.
 
 == What cannot be deferred
 
@@ -415,7 +409,7 @@ No fixed-memory summary retains raw sample identity, temporal order, correlation
 
 == Positive weighted support
 
-An observed stream defines an empirical distribution made of point masses. RankKnot replaces that large measure with at most 64 positive weighted locations. In one dimension, this can be understood as moving nearby rank mass onto representative support points—a small transport coreset @peyre2019.
+An observed stream defines an empirical distribution made of point masses. RankKnot replaces that large measure with at most 32 positive weighted locations. In one dimension, this can be understood as moving nearby rank mass onto representative support points—a small transport coreset @peyre2019.
 
 #intuition(
   [The compressed history],
@@ -424,15 +418,15 @@ An observed stream defines an empirical distribution made of point masses. RankK
   [Thousands of observations become a short weighted support. Large circles carry more probability; positivity and normalization are explicit.],
 )
 
-Every input affects the state, but most inputs cease to be individually identifiable after compression. Any number of distinct values may enter. At most 64 locations remain exact; excess support is approximated by the same rule used for continuous data. There is no separate “number of atoms supported” configuration.
+Every input affects the state, but most inputs cease to be individually identifiable after compression. Any number of distinct values may enter. At most 32 locations remain exact; excess support is approximated by the same rule used for continuous data. There is no separate “number of atoms supported” configuration.
 
-== The 400-byte summary-state layout
+== The 208-byte K32 summary-state layout
 
-All positions receive one observation at the same logical tensor update. With NaNs rejected for the whole update, the accepted sample count can live once at `TensorDigest` level. The per-position summary state spends its final eight bytes on exact extrema instead. Input buffering and flush workspace are separate from this layout.
+All positions receive one observation at the same logical tensor update, so one `u64` sample count lives in RankKnot storage rather than in every position. The per-position state spends its final eight bytes on exact extrema. Input buffering and flush workspace are separate from this layout. NaN input is unsupported: `update` currently buffers it without validation, and a later flush panics in the sort comparator. This is not an atomic whole-update rejection contract.
 
 #intuition(
   [Summary-state accounting],
-  [$ 64 dot 4 + 64 dot 2 + 8 + 8 = 400 " bytes" $],
+  [$ 32 dot 4 + 32 dot 2 + 8 + 8 = 208 " bytes" $],
   memory-art,
   [The four terms are `f32` locations, `u16` masses, a 64-bit tie mask, and two `f32` extrema. Zero mass identifies an unused slot.],
 )
@@ -442,30 +436,30 @@ All positions receive one observation at the same logical tensor update. With Na
     columns: (1.5fr, .7fr, 2.2fr),
     align: (left, right, left),
     table.header([*Field*], [*Bytes*], [*Meaning*]),
-    [`values[64]: f32`], [256], [mixed-group means or retained exact values],
-    [`masses[64]: u16`], [128], [probability quanta; active masses sum to 65,535],
-    [`pure_mask: u64`], [8], [one bit per location that still represents one exact value],
-    [`min`, `max`: `f32`], [8], [exact finite endpoints for later range decisions],
-    [*Summary-state total*], [*400*], [no pointers and no per-position allocation],
+    [`values[32]: f32`], [128], [mixed-group means or retained exact values],
+    [`masses[32]: u16`], [64], [probability quanta; active masses sum to 65,535],
+    [`pure_mask: u64`], [8], [one bit per active location; upper 32 bits are unused],
+    [`min`, `max`: `f32`], [8], [exact endpoints, including supported infinities],
+    [*Summary-state total*], [*208*], [no pointers and no per-position allocation],
   )
 ]
 
-Per-position missingness would break the shared-count assumption and must pay an explicit memory or semantic cost. The initial backend should reject a whole tensor update containing NaN rather than silently desynchronize position counts.
+Per-position missingness would break the shared-count assumption and must pay an explicit memory or semantic cost. Atomic NaN rejection would require an ingestion validation pass; the current performance-oriented contract instead assumes NaN-free observations. Positive and negative infinity are supported and protected as pure singleton groups.
 
 = Streaming compression
 
 == Buffer first, compress rarely
 
-Updates append full row-major tensor samples to one 256-row input buffer. A flush gathers one position into worker-local scratch, then handles positions independently and in parallel:
+Updates append full row-major tensor samples to one input buffer whose public `buffer_capacity` defaults to 256. A flush handles positions independently using Rayon, with a minimum parallel chunk length of 64:
 
-+ Sort and run-length encode the new values.
-+ Expand old normalized masses relative to the shared historical count.
-+ Merge at most 64 old locations with the batch runs.
-+ Place 64 target cells in rank space and snap cuts to indivisible masses.
-+ Store a weighted mean for every mixed cell and a purity bit for every one-value cell.
-+ Prefix-round cumulative masses back to 16 bits and update exact extrema.
++ Gather one position into a worker-local `Vec<f32>` and unstable-sort it with `partial_cmp`.
++ Linearly merge it with up to 32 old representatives, coalescing equal values during the merge.
++ Evaluate 31 fixed arcsine cuts and snap each to the nearest entry boundary.
++ Skip duplicate or unusable cuts; fewer than 32 groups may remain. Protect infinities as pure singleton groups.
++ Store exact pure singletons and `f64`-accumulated weighted means, rounded to `f32`, for mixed groups.
++ Prefix-round cumulative masses to 65,535 with ties-to-even, difference adjacent prefixes, and update extrema.
 
-The hot path uses bounded arrays over roughly 320 sorted entries. This scratch scales with the worker count, not the tensor width. The proposed implementation must not retain a `numel × batch_rows` sorted copy: that extra tensor-sized buffer would add another 1,024 bytes per `f32` position. There is no per-position hash table, dynamic allocation, iterative optimization, or query reconstruction.
+At the default capacity the merged stream contains at most 288 entries. Scratch consists of two preallocated worker-local vectors and one fixed 31-element boundary array. It scales with parallel work rather than tensor width; there is no `numel × batch_rows` sorted copy, per-position hash table, or iterative optimizer. The vectors do allocate when a Rayon job initializes, so “no dynamic allocation” applies only to persistent per-position state, not flush workspace.
 
 == Tail-companded rank cells
 
@@ -478,7 +472,7 @@ Uniform rank cells spend the same resolution at the median and at the extremes. 
   [Equal slot steps on the upper line become denser at both ends of probability space. This is the same broad tail-allocation principle that benefits t-digest @dunning2019.],
 )
 
-A large exact tie may contain several desired cuts. Those cuts snap to the tie boundaries; unused slots then recursively split the widest remaining intervals in transformed rank space. A 50% zero mass consumes one support location rather than half the state.
+A large exact tie may contain several desired cuts. Duplicate snapped cuts are skipped, so a 50% zero mass consumes one support location rather than half the state. The current implementation does not recursively refill unused cuts; a tie-heavy stream can therefore finish with fewer than 32 active locations.
 
 == Mixed cells use weighted means
 
@@ -495,7 +489,7 @@ A cell containing one exact location retains that location and sets its purity b
 
 == Prefix-rounded probability
 
-Sixteen-bit probability masses allow 64 locations at the same memory where 32-bit counts allow 48. The exact total sample count remains outside the cell. Cumulative prefixes are rounded first, then differenced, so every represented CDF boundary is directly controlled.
+Sixteen-bit probability masses keep the K32 state compact. The exact total sample count remains outside each position. Cumulative prefixes are rounded first, then differenced, so every represented CDF boundary is directly controlled.
 
 #intuition(
   [Sixteen-bit mass encoding],
@@ -504,7 +498,7 @@ Sixteen-bit probability masses allow 64 locations at the same memory where 32-bi
   [Each orange step follows the blue cumulative mass. Prefix rounding avoids independent mass errors all drifting in one direction.],
 )
 
-The current boundary discrepancy is below one half probability quantum. Repeated compression and requantization can still accumulate approximation; long streams and repeated distribution shifts remain mandatory tests.
+The current boundary discrepancy is at most one half probability quantum. Repeated compression and requantization can still accumulate approximation; long streams and repeated distribution shifts remain mandatory tests.
 
 = Cold reconstruction and regrouping
 
@@ -519,7 +513,7 @@ Each mixed knot is anchored at the center rank of its encoded mass. Neighboring 
   [Blue segments interpolate unresolved continuous mass. The green plateau represents an exact retained tie across a whole rank interval.],
 )
 
-Endpoint requests bypass this interpolation. Probability zero returns exact `min`; probability one returns exact `max`. This avoids the severe heavy-tail underestimation that would result from treating the outer mixed-group means as extrema.
+Endpoint requests bypass this interpolation. For a nonempty summary, any `q <= 0` returns exact `min`, any `q >= 1` returns exact `max`, and a NaN probability returns NaN. An empty summary returns `0.0` for every probability, including NaN, because the emptiness check runs first. Queries flush pending rows first and can therefore trigger the unsupported-input panic if buffered observations contain NaN. Tensor-wide queries run in parallel; `cell_quantiles` evaluates one position locally. When an infinity is adjacent to a finite anchor, the interpolation helper returns the infinity throughout that gap rather than producing NaN.
 
 == Choose robust ranges later
 
@@ -532,9 +526,9 @@ A caller can defer its tail policy until after collection. One consumer may want
   [The shaded total tail mass is selected later. Collection does not hardcode `tau`, symmetry, or the eventual use of the range.],
 )
 
-== Merge arbitrary positions later
+== Future consumer: regrouping
 
-The stored object is a positive weighted measure. To form a channel, token group, spatial region, or whole tensor, scale cell masses by their observation counts and optional group weights, union all support, sort once, and run the same compressor.
+The generic contract now exposes `merge_cells`, `merge_channels`, and `merge_all`, but RankKnot’s implementations are deliberate `unimplemented!` stubs and panic when called. Its encoded state is crate-private, so callers cannot provide the missing union externally. A working implementation could treat each stored object as a positive weighted measure: scale masses by observation counts and optional group weights, union support, sort once, and run a compatible compressor.
 
 #intuition(
   [Deferred grouping],
@@ -543,11 +537,11 @@ The stored object is a positive weighted measure. To form a channel, token group
   [Fine-grained histories become one group distribution without replaying the original tensor samples. Grouping policy is a cold decision.],
 )
 
-Aggregation latency is intentionally not a performance requirement. Cold merges may allocate temporary vectors and globally sort all input support.
+Aggregation latency would not be a performance requirement. Such a future cold merge could allocate temporary vectors and globally sort all input support. The present reducer is used only for buffered ingestion.
 
-= Example consumer: post-training quantization
+= Future consumer: post-training quantization
 
-PTQ illustrates why deferred distribution storage is useful. A calibration run can collect activation histories before choosing bit width, symmetric versus asymmetric ranges, per-tensor versus per-channel grouping, or clipping policy. The same RankKnot state can compare those choices later. PTQ methods commonly use a small representative set to establish activation ranges @hubara2021 @nagel2021.
+PTQ illustrates why deferred distribution storage could be useful. A calibration run could collect activation histories before choosing bit width, symmetric versus asymmetric ranges, per-tensor versus per-channel grouping, or clipping policy. No current RankKnot API exposes weighted knots to a quantizer, and no quantizer consumes this state; the following equations describe a proposed consumer. PTQ methods commonly use a small representative set to establish activation ranges @hubara2021 @nagel2021.
 
 == Evaluate an affine quantizer
 
@@ -562,7 +556,7 @@ A bounded real interval determines the step spacing of a finite integer codebook
 
 == Search candidates on the stored measure
 
-Instead of selecting one percentile in advance, a cold quantizer can evaluate candidate intervals directly on the 64 weighted locations. This approximates activation reconstruction error while making search cost independent of the original sample count.
+With a future support-export or dedicated PTQ API, a cold quantizer could evaluate candidate intervals directly on up to 32 weighted locations. This would approximate activation reconstruction error while making search cost independent of the original sample count.
 
 #intuition(
   [Quantization is a consumer, not the state],
@@ -588,18 +582,18 @@ A requested quantile inside an empirical jump is correctly answered by the repea
 
 Application-specific consumers must report their own outcomes as well. Rank error evaluates the recorder; it does not replace downstream quality, reconstruction error, alert precision, or visualization usefulness.
 
-== Feasibility protocol
+== Historical K64 Python feasibility protocol
 
-The checked-in experiment uses two held-out seeds, 32,768 `f32` observations per workload, 256-row flushes, and 235 query probabilities from one ten-thousandth through its upper complement. Parameter exploration used a separate seed. The Python prototype simulates 16-bit prefix masses and persistent `f32` representatives. Repository `TDigest` and `QuantileSpine` run through a temporary Rust crate on identical ordered values.
+The checked-in historical experiment uses two held-out seeds, 32,768 `f32` observations per workload, 256-row K64 prototype flushes, and 235 query probabilities from one ten-thousandth through its upper complement. Parameter exploration used a separate seed. The Python prototype simulates a *64-knot* state with 16-bit prefix masses and persistent `f32` representatives. Repository `TDigest` and `QuantileSpine` run through a temporary Rust crate on identical ordered values using their own default buffering. These measurements do not describe the current K32 Rust implementation.
 
 Workloads include uniform, normal, two lognormal scales, Student-t, shuffled and blocked mixtures, one and five added atoms, 50% zero, constants, 8–256-level quantization, and identical uniform multisets in random, ascending, and descending order. Ordered cases are diagnostics rather than proposed gates.
 
-== General-distribution results
+== Historical K64 general-distribution results
 
 #table(
   columns: (1.35fr, .9fr, .9fr, .9fr, .9fr),
   align: (left, right, right, right, right),
-  table.header([*Workload*], [*RankKnot mean*], [*t-digest mean*], [*RankKnot max*], [*t-digest max*]),
+  table.header([*Workload*], [*K64 mean*], [*t-digest mean*], [*K64 max*], [*t-digest max*]),
   [uniform], [0.000267], [0.001414], [0.001150], [0.005179],
   [normal], [0.000271], [0.001018], [0.001069], [0.005746],
   [lognormal, σ=1], [0.000346], [0.002420], [0.001304], [0.008954],
@@ -609,11 +603,11 @@ Workloads include uniform, normal, two lognormal scales, Student-t, shuffled and
   [bimodal, blocked], [0.001288], [0.010447], [0.016979], [0.066882],
 )
 
-#figure(bars-art, caption: [Mean valid-rank error on selected held-out workloads. Bars use thousandths of rank. Lower is better; separated modes remain harder than smooth distributions.])
+#figure(bars-art, caption: [Historical K64 Python mean valid-rank error on selected held-out workloads. Bars use thousandths of rank. Lower is better; separated modes remain harder than smooth distributions.])
 
-Across all 36 workload/seed pairs, RankKnot’s mean-of-means was 0.000330 and its worst observed maximum was 0.016979. The repository t-digest values were 0.006928 and 0.246068. RankKnot had lower mean and maximum error on every nonconstant pair; both methods tied on constants.
+Across all 36 workload/seed pairs, the historical K64 prototype’s mean-of-means was 0.000330 and its worst observed maximum was 0.016979. The repository t-digest values were 0.006928 and 0.246068. K64 had lower mean and maximum error on every nonconstant pair; both methods tied on constants. This is capacity-design evidence, not a claim about current K32.
 
-== Discrete observations
+== Historical K64 discrete observations
 
 #block(breakable: false)[
   #table(
@@ -629,108 +623,145 @@ Across all 36 workload/seed pairs, RankKnot’s mean-of-means was 0.000330 and i
   )
 ]
 
-Zero means zero at the 235 tested ranks, not equality at every possible probability. The result demonstrates that repeated values need no separately hardcoded capacity.
+Zero means zero at the 235 tested ranks, not equality at every possible probability. The historical result demonstrates that repeated values need no separately hardcoded atom capacity.
+
+== Current Rust K32 evidence
+
+The current `backend_accuracy` executable uses 100,000 samples at each of 32 representative tensor positions, nine query probabilities from 0.001 through 0.999, and tie-aware empirical rank intervals. RankKnot and Quantile Spine use their default 256-row buffers; t-digest uses its default 200-row buffer. Its adversarial suite uses 65,536 samples at one position and 1,003 probabilities. Heap figures come from an instrumented global allocator and exclude inputs, exact truth, and query outputs.
+
+#table(
+  columns: (1.25fr, 1fr, 1fr, 1fr),
+  align: (left, right, right, right),
+  table.header([*Workload*], [*K32 mean / max*], [*t-digest mean / max*], [*Spine mean / max*]),
+  [normal], [0.000458 / 0.001460], [0.000627 / 0.006950], [0.000302 / 0.001490],
+  [uniform], [0.000681 / 0.001170], [0.001334 / 0.007380], [0.000575 / 0.001780],
+  [lognormal], [0.000860 / 0.002290], [0.001831 / 0.012570], [0.000758 / 0.002130],
+  [32-level normal], [0.000094 / 0.000660], [0.009511 / 0.034780], [0.011590 / 0.055840],
+  [50% zeros], [0.000380 / 0.001380], [0.026949 / 0.252720], [0.000096 / 0.000600],
+  [95% zeros], [0.000508 / 0.006160], [0.000359 / 0.004750], [0.000031 / 0.000420],
+  [heterogeneous], [0.000511 / 0.002260], [0.003170 / 0.051750], [0.001411 / 0.039770],
+)
+
+K32 substantially improves on t-digest for most representative workloads, especially quantized and 50%-zero data, but it is not uniformly best. Quantile Spine has lower mean error on several smooth distributions and clearly wins on 95%-zero activations. K32 often has the smallest maximum error and is particularly strong on the heterogeneous workload. Adversarial results are mixed, so no universal ordering is claimed.
+
+Allocator measurements at 32 positions were 39,432 live / 45,064 peak bytes for K32, 182,408 / typically 239,208 for t-digest, and 77,320 / 113,160 for Quantile Spine. At one position K32 measured 1,240 live / 6,872 peak bytes; the difference between live and peak is worker-local ingestion scratch.
+
+A local Apple M4 Divan run with RankKnot’s default capacity 256 and each comparison backend’s default configuration measured median update times of 8.73 ms for K32 versus 7.72 ms for t-digest on 64×64×1,000 normal data, 8.81 versus 7.51 ms on the corresponding uniform data, and 21.47 versus 26.81 ms on 256×256×200 uniform data. K32 therefore remained 13–17% slower on the smaller repeated-flush cases but was about 20% faster on the larger one. These are platform-specific observations, not portable guarantees.
 
 == Important caveats
 
-- *Extreme tails:* t-digest was often two to three times more accurate at individual smooth tail queries, although RankKnot’s absolute tail errors were small. The worst observed tail error was 0.001719.
-- *Separated modes:* linear interpolation across a large gap remains the largest ordinary-distribution error.
-- *Extrema:* the experiment’s interior state did not include endpoint requests. Proposed min/max sidecars make endpoints exact by construction without changing reported interior estimates.
-- *No speed evidence:* Python runtime is not a proxy for Rust tensor throughput.
-- *No consumer evidence:* no downstream quantizer, alert, or visualization study has yet compared decisions from this state.
+- *Historical extreme tails:* in the K64 study, t-digest was often two to three times more accurate at individual smooth tail queries, although K64’s absolute tail errors were small.
+- *Separated modes:* linear interpolation across a large unsupported value gap remains a principal failure mode.
+- *Extrema:* current K32 endpoint requests use exact min/max sidecars; the historical K64 interior results did not include endpoint requests.
+- *Throughput scope:* the Apple M4 timings above are local medians. Different tensor widths, Rayon pools, CPUs, and system load can change the comparison.
+- *No consumer evidence:* no RankKnot quantizer, group merge, alert, visualization, or serialization study exists because those APIs are not implemented.
 
 = A deliberately small systems design
 
 == Rust representation
 
 ```rust
+const RANK_KNOT_K: usize = 32;
+
 #[repr(C)]
-struct RankKnot {
-    values: [f32; 64],
-    masses: [u16; 64],
+struct RankKnotState {
+    values: [f32; RANK_KNOT_K],
+    masses: [u16; RANK_KNOT_K],
     pure_mask: u64,
     min: f32,
     max: f32,
 }
 ```
 
-The accepted tensor sample count and exceptional-value policy belong to `TensorDigest`, shared across all positions. Temporary flush arithmetic uses wider accumulators; persistent representatives round to `f32` only once per flush. With the default 256 `f32` rows, live tensor-scaled storage is therefore 400 + 1,024 = 1,424 bytes per position, not 400 bytes. Per-worker scratch and small object headers remain additional but do not scale with the number of positions.
+`RankKnotState` is crate-private; the public `RankKnot` type is a zero-sized kernel marker. One `u64` sample count is shared across positions in `RankKnotStorage`. Temporary weights and weighted moments use `u64` and `f64`; persistent representatives round to `f32`. With 256 buffered rows, tensor-scaled retained storage is approximately 208 + 1,024 = 1,232 bytes per position. Worker scratch and object headers are additional.
 
-== One compressor everywhere
+== One current ingestion reducer
 
-The same deterministic reducer should implement buffered flush and every cold merge. A single representation before and after aggregation avoids separate “streaming,” “query,” and “merge” models. Cold consumers may build caches, dense plots, or candidate-search workspaces, but none become persistent per-position state.
+The deterministic reducer currently implements buffered ingestion only. Reusing it for cold merges remains a design direction. Current RankKnot callers cannot access the encoded support, and no RankKnot-specific cache or query-time workspace is retained per position.
 
 == Minimal configuration
 
+#block(breakable: false)[
+  #table(
+    columns: (1.35fr, 1fr, 2.1fr),
+    table.header([*Item*], [*Current value*], [*Status*]),
+    [`buffer_capacity`], [`256`], [public and configurable; must be positive],
+    [input type], [`f32`], [RankKnot is implemented only for `f32`],
+    [knot count], [`32`], [fixed internal constant],
+    [mass quanta], [`65,535`], [fixed internal `u16` normalization],
+    [rank scale], [arcsine], [fixed internal targets],
+    [NaN], [unsupported], [not validated on update; panics during flush],
+    [infinities], [supported], [protected pure singleton groups and exact endpoints],
+  )
+]
+
+Only `buffer_capacity` is public configuration. The mass encoding, knot count, and scale function remain implementation details while long-stream and cross-platform behavior stabilizes.
+
+= Validation status
+
+== Implemented coverage
+
 #table(
-  columns: (1.35fr, 1fr, 2.1fr),
-  table.header([*Parameter*], [*Default*], [*Reason*]),
-  [`knots`], [`64`], [fills the 400-byte packed layout],
-  [`mass_quanta`], [`65535`], [full positive `u16` probability range],
-  [`batch_rows`], [`256`], [matches the experiment; costs 1,024 input-buffer bytes per `f32` position],
-  [`rank_scale`], [`arcsine`], [balanced measured accuracy with tail emphasis],
-  [`NaN`], [`reject update`], [preserves one shared count across positions],
-  [`infinities`], [`explicit endpoints`], [avoid contaminating finite means],
+  columns: (1.25fr, 2.75fr),
+  table.header([*Area*], [*Current evidence*]),
+  [Buffering], [default/custom capacity, partial and full flushes, and sample count],
+  [Queries], [monotone curves, NaN query probability, exact endpoints, and tensor/cell paths],
+  [Discrete data], [retained tie intervals, constants, and deterministic signed-zero extrema],
+  [Exceptional values], [protected positive and negative infinities],
+  [Encoding], [ordered support, active masses summing to 65,535, and ties-to-even quantization],
+  [Accuracy/memory], [`backend_accuracy` representative and adversarial suites with allocator instrumentation],
+  [Throughput], [Divan benchmarks for normal and uniform tensors at two representative sizes],
 )
 
-Do not expose the mass encoding or scale function publicly until long-stream and cross-platform tests stabilize the state transition.
+== Open work
 
-= Validation plan
+- define and test an atomic NaN policy, or make the NaN-free precondition part of the stable contract;
+- test requantization drift through at least one million updates and repeated shifts;
+- check in reproducible current K32 accuracy and benchmark result artifacts with platform metadata;
+- replace the RankKnot and Quantile Spine `merge_*` panic stubs with implementations and fidelity tests;
+- add RankKnot state export or serialization before claiming durable deferred analysis;
+- build visualization, PTQ, or threshold consumers and measure application outcomes;
+- continue throughput work on smaller repeated-flush tensors, where K32 still trails t-digest locally.
 
-== Recorder-level gates
-
-#table(
-  columns: (1.2fr, 2.8fr),
-  table.header([*Gate*], [*Requirement*]),
-  [Typical accuracy], [lower aggregate mean and maximum rank error than t-digest on the preregistered representative suite],
-  [Memory], [400 bytes of summary state and at most 1,424 tensor-scaled live bytes per `f32` position at 256 rows; no tensor-sized sorted copy],
-  [Hot throughput], [update and flush throughput at least as high as the current t-digest at target tensor widths],
-  [Numerics], [monotone queries, finite mixed means, exact finite extrema, and no mass underflow],
-  [Long streams], [no unacceptable drift through at least one million updates and repeated distribution shifts],
-  [Cold merge], [grouped summaries agree with direct-stream summaries within a declared rank tolerance],
-)
-
-Ascending streams, blocked modes, and crafted float patterns remain non-gating diagnostics. They still need a loose catastrophic ceiling: an unlikely stream is not permission for NaNs or nonmonotone answers.
-
-== Consumer-level studies
-
-Recorder accuracy is necessary but not sufficient. Validate at least one real deferred consumer from each intended class:
-
-- a visualization or percentile-band report;
-- a grouped channel/tensor summary;
-- a PTQ calibration comparison against t-digest-selected ranges;
-- a thresholding or saturation diagnostic if those APIs are planned.
-
-The consumer study should use the same collected state to compare several policies. That is the central benefit of deferral.
+Ascending streams, blocked modes, and crafted float patterns remain useful diagnostics rather than universal gates. Fixed memory does not provide a worst-case distribution-free accuracy guarantee.
 
 = Risks and limitations
 
-- *Approximation, not archival:* individual observations and temporal order are irrecoverable.
+- *Approximation, not archival:* individual observations and temporal order are irrecoverable, and RankKnot has no snapshot format.
 - *Representative data:* no summary can infer a deployment regime that was never observed.
 - *Marginal state:* cross-position covariance and sample identity are absent.
-- *Requantization drift:* 16-bit masses buy 64 support locations but repeatedly approximate old probability. A 48-location `u32` fallback remains useful.
-- *Shared count:* rejecting an entire update because one position is NaN may not suit every caller. Per-position missingness requires a revised layout.
-- *Tail parity:* t-digest remains stronger at many individual extreme-tail queries.
-- *Working memory:* the 400-byte title names summary state only. The default input buffer raises proposed live tensor-scaled storage to 1,424 bytes per `f32` position, and a full sorted copy would raise it to 2,448 bytes.
-- *Fixed memory:* no 400-byte summary state offers tiny distribution-free error for every stream.
+- *Requantization drift:* 16-bit masses compactly encode 32 locations but repeatedly approximate old probability.
+- *Shared count and NaN:* NaN currently reaches the buffer and panics during flush. Per-position missingness or atomic rejection requires revised semantics or extra work.
+- *Tail and mode parity:* no backend wins every workload; sparse zero activations, extreme tails, and separated modes remain important counterexamples.
+- *Working memory:* the 208-byte title names state only. The default input buffer raises tensor-scaled retained storage to about 1,232 bytes per `f32` position, and worker scratch raises peak heap.
+- *Unavailable consumers:* merge, analysis, zero-filtering, serialization, and visualization methods are contract stubs that panic for RankKnot; knots are crate-private; PTQ and direct support export are absent.
+- *Fixed memory:* no 208-byte state offers tiny distribution-free error for every stream.
 
 #callout([The design principle], [Collection should preserve a useful approximation of the observed distribution while making as few downstream choices as possible. RankKnot spends its state budget on rank mass, ties, and extrema; everything else is deferred.], tone: green)
 
 = Reproducibility
 
-The executable experiment and held-out results are:
+Current K32 Rust behavior is defined and exercised by:
+
+- `monatq/src/kernels/rankknot.rs`
+- `monatq/tests/rankknot.rs`
+- `monatq/src/bin/backend_accuracy.rs`
+- `monatq/benches/tensor_digest.rs`
+
+Run `cargo run -p monatq --release --bin backend_accuracy` for the current accuracy/memory report and `cargo bench -p monatq --bench tensor_digest` for throughput. The numeric K32 results in this note came from a local Apple M4 run and are not yet checked in as a machine-readable artifact.
+
+Historical K64 feasibility evidence remains in:
 
 - `docs/experiments/transport_coreset_feasibility.py`
 - `docs/experiments/results/transport-coreset-holdout.csv`
+- `docs/experiments/README.md`
 
-The script deterministically generates all workloads, simulates both 48-location `u32` and 64-location `u16` streaming layouts, creates a temporary Rust crate, and queries repository `TDigest` and `QuantileSpine`. It requires Python, NumPy, and Cargo. The offline row is a representation upper bound, not a streaming backend.
-
-The next artifact should record real tensor shapes, sample counts, throughput, selected cold policies, and consumer outputs in a machine-readable table.
+That script simulates 48-location `u32` and 64-location `u16` layouts and invokes repository backends through a temporary Rust crate. Its unqualified “RankKnot” label means the historical K64 prototype, not current K32.
 
 = Conclusion
 
-RankKnot is a compact tensor-history backend, not a quantizer. It ingests every observation into a 400-byte positive summary state, preserves retained ties and exact extrema, and allows quantiles, grouping, visualization, clipping, and quantization policies to be chosen later. In the current feasibility suite it improves broad rank accuracy and discrete behavior over the repository t-digest. Apples-to-apples, its summary state is about one twelfth of the default t-digest state; its proposed one-buffer live tensor-scaled allocation is about one quarter of the current t-digest allocation. Its summary state is 32 bytes larger than Quantile Spine’s, so any live-memory advantage over that backend depends on avoiding Quantile Spine’s tensor-sized sort buffer.
+Current RankKnot is a working K32, `f32`-only quantile backend. Its 208-byte per-position state preserves exact extrema and retained pure ties, its default live allocation is substantially smaller than both comparison backends, and current Rust accuracy is generally stronger than t-digest on the representative suite without being uniformly best. Local throughput beats t-digest on the larger tested tensor and still trails it on smaller repeated-flush cases.
 
-The remaining questions are operational: Rust throughput, long-stream mass drift, cold-merge fidelity, and whether real deferred consumers make decisions as good as or better than those based on t-digest. Those tests should decide the backend before its public API is stabilized.
+The broader K64 Python results remain useful evidence for the design’s capacity trade-off, but they are not current-backend results. Merge, analysis, zero-filtering, serialization, and visualization are present in the generic contract but remain panic stubs for RankKnot; direct knot access, clipping search, and quantization are absent. The next decisions should be driven by long-stream drift, reproducible cross-platform throughput, an explicit NaN contract, and real consumer studies rather than by the historical prototype alone.
 
 #bibliography("references.bib", title: [References])

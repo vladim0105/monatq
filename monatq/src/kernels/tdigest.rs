@@ -328,14 +328,6 @@ impl<T: TensorValue> TDigestStorage<T> {
         zstd::encode_all(payload.as_slice(), 3).map_err(std::io::Error::other)
     }
 
-    /// Flush pending data and write a zstd-compressed bincode snapshot to `path`.
-    pub fn save(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        std::fs::write(path, self.to_bytes()?)
-    }
-
     /// Load and decompress a snapshot from memory.
     pub fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
     where
@@ -344,15 +336,6 @@ impl<T: TensorValue> TDigestStorage<T> {
         let payload = zstd::decode_all(bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Self::from_payload(&payload)
-    }
-
-    /// Load and decompress a snapshot written by `save`.
-    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let bytes = std::fs::read(path)?;
-        Self::from_bytes(&bytes)
     }
 
     pub(crate) fn from_payload(payload: &[u8]) -> std::io::Result<Self>
@@ -432,6 +415,47 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     }
     fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
         self.cell_quantiles(idx, qs)
+    }
+    fn merge_cells(&mut self, indices: &[usize]) -> Self {
+        TDigestStorage::merge_cells(self, indices)
+    }
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
+        TDigestStorage::merge_channels(self, channel_indices)
+    }
+    fn merge_all(&mut self) -> Self {
+        TDigestStorage::merge_all(self)
+    }
+    fn analyze(&mut self) -> Vec<crate::Distribution> {
+        TDigestStorage::analyze(self)
+    }
+    fn without_zeros(&mut self) -> Self {
+        TDigestStorage::without_zeros(self)
+    }
+    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    where
+        T: serde::Serialize,
+    {
+        TDigestStorage::to_bytes(self)
+    }
+    fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        TDigestStorage::from_bytes(bytes)
+    }
+    fn from_payload(payload: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        TDigestStorage::from_payload(payload)
+    }
+    #[cfg(feature = "visualize")]
+    fn visualize(&mut self) -> std::io::Result<()> {
+        TDigestStorage::visualize(self)
+    }
+    #[cfg(feature = "visualize")]
+    fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
+        TDigestStorage::visualize_until(self, stop)
     }
 }
 

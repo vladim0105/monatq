@@ -2,14 +2,14 @@ use std::marker::PhantomData;
 
 use crate::{
     TensorValue,
-    kernels::{self, DigestKernel, QuantileSpine, RankKnot, TDigest},
+    kernels::{self, DigestKernel, QuantileSpine, RankKnot},
 };
 
 /// Operations shared by every kernel-specific storage layout.
 ///
 /// This trait is crate-private so storage remains an implementation detail while the
 /// public container can provide one statically dispatched implementation of its common API.
-pub(crate) trait StorageOperations<T: TensorValue> {
+pub(crate) trait StorageOperations<T: TensorValue>: Sized {
     fn numel(&self) -> usize;
     fn shape(&self) -> &[usize];
     fn total_weight(&self, idx: usize) -> u32;
@@ -18,6 +18,24 @@ pub(crate) trait StorageOperations<T: TensorValue> {
     fn quantile(&mut self, q: f32) -> Vec<f32>;
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>>;
     fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32>;
+    fn merge_cells(&mut self, indices: &[usize]) -> Self;
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self;
+    fn merge_all(&mut self) -> Self;
+    fn analyze(&mut self) -> Vec<crate::Distribution>;
+    fn without_zeros(&mut self) -> Self;
+    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    where
+        T: serde::Serialize;
+    fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned;
+    fn from_payload(payload: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned;
+    #[cfg(feature = "visualize")]
+    fn visualize(&mut self) -> std::io::Result<()>;
+    #[cfg(feature = "visualize")]
+    fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()>;
 }
 
 /// A tensor-wide approximate quantile digest using the statically selected kernel `K`.
@@ -87,29 +105,39 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     pub fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
         self.storage.cell_quantiles(idx, qs)
     }
-}
 
-impl<T: TensorValue> TensorDigest<T, TDigest> {
-    pub fn analyze(&mut self) -> Vec<crate::Distribution> {
-        self.storage.analyze()
-    }
-
+    /// Merge selected flat-indexed tensor positions into a one-position digest.
+    ///
+    /// Panics if the selected kernel does not yet implement merging.
     pub fn merge_cells(&mut self, indices: &[usize]) -> Self {
         Self::from_storage(self.storage.merge_cells(indices))
     }
 
+    /// Merge selected leading-dimension channels into one channel digest.
+    ///
+    /// Panics if the selected kernel does not yet implement merging.
     pub fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
         Self::from_storage(self.storage.merge_channels(channel_indices))
     }
 
+    /// Merge every tensor position into a one-position digest.
+    ///
+    /// Panics if the selected kernel does not yet implement merging.
     pub fn merge_all(&mut self) -> Self {
         Self::from_storage(self.storage.merge_all())
     }
 
+    /// Analyze the distribution at every tensor position.
+    pub fn analyze(&mut self) -> Vec<crate::Distribution> {
+        self.storage.analyze()
+    }
+
+    /// Return a copy with values centered at zero removed.
     pub fn without_zeros(&mut self) -> Self {
         Self::from_storage(self.storage.without_zeros())
     }
 
+    /// Serialize this digest.
     pub fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
     where
         T: serde::Serialize,
@@ -117,32 +145,35 @@ impl<T: TensorValue> TensorDigest<T, TDigest> {
         self.storage.to_bytes()
     }
 
+    /// Save this digest to a file.
     pub fn save(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()>
     where
         T: serde::Serialize,
     {
-        self.storage.save(path)
+        std::fs::write(path, self.to_bytes()?)
     }
 
+    /// Deserialize a digest.
     pub fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        kernels::tdigest::TDigestStorage::from_bytes(bytes).map(Self::from_storage)
+        <K::Storage as StorageOperations<T>>::from_bytes(bytes).map(Self::from_storage)
     }
 
+    /// Load a digest from a file.
     pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        kernels::tdigest::TDigestStorage::load(path).map(Self::from_storage)
+        Self::from_bytes(&std::fs::read(path)?)
     }
 
     pub(crate) fn from_payload(payload: &[u8]) -> std::io::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        kernels::tdigest::TDigestStorage::from_payload(payload).map(Self::from_storage)
+        <K::Storage as StorageOperations<T>>::from_payload(payload).map(Self::from_storage)
     }
 
     #[cfg(feature = "visualize")]

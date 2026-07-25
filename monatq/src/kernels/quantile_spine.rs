@@ -829,6 +829,47 @@ impl<T: TensorValue> StorageOperations<T> for QuantileSpineStorage<T> {
     fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
         self.cell_quantiles(idx, qs)
     }
+    fn merge_cells(&mut self, _indices: &[usize]) -> Self {
+        unimplemented!("QuantileSpine cell merging is not implemented")
+    }
+    fn merge_channels(&mut self, _channel_indices: &[usize]) -> Self {
+        unimplemented!("QuantileSpine channel merging is not implemented")
+    }
+    fn merge_all(&mut self) -> Self {
+        unimplemented!("QuantileSpine tensor merging is not implemented")
+    }
+    fn analyze(&mut self) -> Vec<crate::Distribution> {
+        unimplemented!("QuantileSpine distribution analysis is not implemented")
+    }
+    fn without_zeros(&mut self) -> Self {
+        unimplemented!("QuantileSpine zero filtering is not implemented")
+    }
+    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    where
+        T: serde::Serialize,
+    {
+        unimplemented!("QuantileSpine serialization is not implemented")
+    }
+    fn from_bytes(_bytes: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        unimplemented!("QuantileSpine deserialization is not implemented")
+    }
+    fn from_payload(_payload: &[u8]) -> std::io::Result<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        unimplemented!("QuantileSpine payload deserialization is not implemented")
+    }
+    #[cfg(feature = "visualize")]
+    fn visualize(&mut self) -> std::io::Result<()> {
+        unimplemented!("QuantileSpine visualization is not implemented")
+    }
+    #[cfg(feature = "visualize")]
+    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
+        unimplemented!("QuantileSpine visualization is not implemented")
+    }
 }
 
 impl<T: TensorValue> DigestKernel<T> for QuantileSpine {

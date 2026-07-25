@@ -225,6 +225,57 @@ impl StorageOperations<f32> for RankKnotStorage {
         assert!(idx < self.numel, "position index out of bounds");
         qs.iter().map(|&q| query(&self.states[idx], q)).collect()
     }
+
+    fn merge_cells(&mut self, _indices: &[usize]) -> Self {
+        unimplemented!("RankKnot cell merging is not implemented")
+    }
+
+    fn merge_channels(&mut self, _channel_indices: &[usize]) -> Self {
+        unimplemented!("RankKnot channel merging is not implemented")
+    }
+
+    fn merge_all(&mut self) -> Self {
+        unimplemented!("RankKnot tensor merging is not implemented")
+    }
+
+    fn analyze(&mut self) -> Vec<crate::Distribution> {
+        unimplemented!("RankKnot distribution analysis is not implemented")
+    }
+
+    fn without_zeros(&mut self) -> Self {
+        unimplemented!("RankKnot zero filtering is not implemented")
+    }
+
+    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    where
+        f32: serde::Serialize,
+    {
+        unimplemented!("RankKnot serialization is not implemented")
+    }
+
+    fn from_bytes(_bytes: &[u8]) -> std::io::Result<Self>
+    where
+        f32: serde::de::DeserializeOwned,
+    {
+        unimplemented!("RankKnot deserialization is not implemented")
+    }
+
+    fn from_payload(_payload: &[u8]) -> std::io::Result<Self>
+    where
+        f32: serde::de::DeserializeOwned,
+    {
+        unimplemented!("RankKnot payload deserialization is not implemented")
+    }
+
+    #[cfg(feature = "visualize")]
+    fn visualize(&mut self) -> std::io::Result<()> {
+        unimplemented!("RankKnot visualization is not implemented")
+    }
+
+    #[cfg(feature = "visualize")]
+    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
+        unimplemented!("RankKnot visualization is not implemented")
+    }
 }
 
 fn merge_old_and_incoming(
