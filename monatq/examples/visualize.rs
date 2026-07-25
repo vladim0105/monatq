@@ -85,7 +85,7 @@ fn parse_shape(s: &str) -> Result<Vec<usize>, String> {
     if dims.len() < 2 {
         return Err("shape must have at least 2 dimensions".into());
     }
-    if dims.iter().any(|&d| d == 0) {
+    if dims.contains(&0) {
         return Err("shape dimensions must be non-zero".into());
     }
     Ok(dims)
