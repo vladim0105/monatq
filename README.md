@@ -2,7 +2,7 @@
 
 **Monakhov Tensor Quantiles** - approximate quantile tracking for tensors.
 
-`monatq` provides a unified `TensorDigest<T, K>` container with statically selected `TDigest` and `QuantileSpine` kernels. Each kernel retains its optimized flat storage layout, and updates are parallelised element-wise via Rayon.
+`monatq` provides a unified `TensorDigest<T, K>` container with statically selected `RankKnot`, `TDigest`, and `QuantileSpine` kernels. `K` defaults to `RankKnot`. Each kernel retains its optimized flat storage layout, and updates are parallelised element-wise via Rayon.
 
 ## Use Cases
 
@@ -24,10 +24,10 @@ cargo add monatq
 ### Usage
 
 ```rust
-use monatq::{TDigest, TensorDigest};
+use monatq::TensorDigest;
 
-// Track a [3, 4] tensor (12 elements) with the T-Digest kernel and default config.
-let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
+// Track a [3, 4] tensor (12 elements) with the default kernel (RankKnot).
+let mut digest = TensorDigest::<f32>::new(&[3, 4]);
 
 // Feed samples (row-major flat slices). `update` rejects a sample whose length
 // does not match the tensor, leaving the digest untouched.
@@ -52,6 +52,26 @@ use monatq::{QuantileSpine, TensorDigest};
 
 let mut digest = TensorDigest::<f32, QuantileSpine>::new(&[3, 4]);
 ```
+
+### Kernels
+
+| Kernel | Element types | Contract |
+| --- | --- | --- |
+| `RankKnot` *(default)* | `f32`, `i32` | complete; 208 B of state per position |
+| `TDigest` | `f32`, `i32` | complete; ~4,900 B of state per position |
+| `QuantileSpine` | `f32`, `i32` | queries only; everything else returns `Unsupported` |
+
+Every kernel is selected statically, so there is no runtime dispatch cost. Name one
+explicitly to override the default:
+
+```rust
+use monatq::{TDigest, TensorDigest};
+
+let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
+```
+
+Both complete kernels summarise `i32` at `f32` resolution, so integer magnitudes above 2^24
+round to the nearest representable value.
 
 ### Errors
 
@@ -82,23 +102,25 @@ validate it, and a later flush will panic.
 ### Snapshots
 
 ```rust
-use monatq::{TDigest, TensorDigest};
+use monatq::TensorDigest;
 
-let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
+let mut digest = TensorDigest::<f32>::new(&[3, 4]);
 // ... update the digest ...
 
-// Serialize to memory and restore with a known element type.
+// Serialize to memory and restore with a known kernel and element type.
 let bytes = digest.to_bytes()?;
-let restored = TensorDigest::<f32, TDigest>::from_bytes(&bytes)?;
+let restored = TensorDigest::<f32>::from_bytes(&bytes)?;
 
-// Or detect f32/i32 from the embedded dtype tag.
+// Or detect both the kernel and the element type from the snapshot itself.
 let restored_any = monatq::from_bytes(&bytes)?;
+println!("{} over {}", restored_any.kernel_name(), restored_any.dtype_name());
 ```
 
 `to_bytes` uses the same zstd-compressed bincode snapshot format as `save`, so file and
-in-memory snapshots are interchangeable. Each snapshot records which kernel wrote it, so
-handing a RankKnot snapshot to the t-digest loader is a clean `InvalidSnapshot` error
-rather than a misparse.
+in-memory snapshots are interchangeable. Snapshots are self-describing: `monatq::from_bytes`
+and `monatq::load` return an `AnyTensorDigest` identifying the kernel and element type, while
+the typed loaders still reject a snapshot written by a different kernel rather than
+reinterpreting its state.
 
 ## Features
 

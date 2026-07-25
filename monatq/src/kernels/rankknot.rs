@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use rayon::prelude::*;
 
 use crate::{
-    Result,
-    error::{check_index, check_sample_len, unsupported},
+    Result, TensorValue,
+    error::{check_index, check_sample_len},
     kernels::{DigestKernel, RankKnot, RankKnotConfig, sealed},
     tensor_digest::StorageOperations,
 };
@@ -48,11 +48,42 @@ struct RankKnotSnapshot {
     maxs: Vec<f32>,
 }
 
+/// The leading fields of [`RankKnotSnapshot`], in the same order.
+///
+/// bincode encodes struct fields sequentially with no framing, so deserializing a prefix
+/// struct reads exactly those fields and stops. That lets the crate-level loader identify a
+/// snapshot's kernel and element type without decoding megabytes of knots first.
+#[derive(serde::Deserialize)]
+struct RankKnotHeader {
+    kernel_tag: u8,
+    #[allow(dead_code)]
+    format_version: u16,
+    #[allow(dead_code)]
+    knot_count: u32,
+    #[allow(dead_code)]
+    mass_quanta: u64,
+    dtype_tag: u8,
+}
+
+/// Identify an uncompressed payload without fully decoding it.
+///
+/// Returns `None` when the payload is not a RankKnot snapshot at all, so the caller can try
+/// another kernel; returns `Some(dtype_tag)` when it is.
+pub(crate) fn peek_dtype_tag(payload: &[u8]) -> Option<u8> {
+    let header: RankKnotHeader = bincode2::deserialize(payload).ok()?;
+    (header.kernel_tag == RANK_KNOT_KERNEL_TAG).then_some(header.dtype_tag)
+}
+
 fn invalid_data(message: impl Into<String>) -> crate::Error {
     crate::Error::InvalidSnapshot(message.into())
 }
 
 /// The complete persistent summary for one tensor position.
+///
+/// Every field is `f32` for every element type `T`. The crate-wide contract reports
+/// quantiles and extrema as `f32` regardless of the input type, and the t-digest kernel
+/// likewise keeps `f32` centroids for `i32` tensors, so widening this state would add cost
+/// without changing a single observable answer.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct RankKnotState {
@@ -98,17 +129,30 @@ impl RankKnotScratch {
     }
 }
 
-pub(crate) struct RankKnotStorage {
+/// Per-position RankKnot summaries for one tensor.
+///
+/// # Element types and precision
+///
+/// Summary state is `f32` regardless of `T`, so an `i32` stream is summarised at `f32`
+/// resolution: magnitudes above 2^24 (16,777,216) are not exactly representable and both
+/// knots and extrema round to the nearest `f32`. This is not a RankKnot-specific limit. The
+/// crate reports quantiles as `f32` for every element type and the t-digest kernel keeps
+/// `f32` centroids for `i32` tensors too, so the ceiling is the same on either kernel.
+///
+/// `T` survives here only where it is genuinely load-bearing: the input buffer holds raw
+/// `T` so ingestion stays a `copy_from_slice`, and the snapshot records `T::DTYPE_TAG` so an
+/// `i32` snapshot cannot be loaded as `f32`.
+pub(crate) struct RankKnotStorage<T> {
     shape: Vec<usize>,
     numel: usize,
     config: RankKnotConfig,
-    row_buffer: Vec<f32>,
+    row_buffer: Vec<T>,
     n_buffered: usize,
     sample_count: u64,
     states: Vec<RankKnotState>,
 }
 
-impl RankKnotStorage {
+impl<T: TensorValue> RankKnotStorage<T> {
     pub(crate) fn with_config(shape: &[usize], config: RankKnotConfig) -> Self {
         assert!(
             config.buffer_capacity > 0,
@@ -122,7 +166,7 @@ impl RankKnotStorage {
             shape: shape.to_vec(),
             numel,
             config,
-            row_buffer: vec![0.0; buffer_len],
+            row_buffer: vec![T::from_f32(0.0); buffer_len],
             n_buffered: 0,
             sample_count: 0,
             states: vec![RankKnotState::default(); numel],
@@ -189,8 +233,8 @@ impl RankKnotStorage {
         for &idx in indices {
             check_index(idx, self.numel)?;
             let state = &self.states[idx];
-            min = min_value(min, state.min);
-            max = max_value(max, state.max);
+            update_min(&mut min, state.min);
+            update_max(&mut max, state.max);
             collect_support(state, &mut entries);
         }
 
@@ -241,6 +285,67 @@ impl RankKnotStorage {
         self.merge_cells(&(0..self.numel).collect::<Vec<_>>())
     }
 
+    /// Return a copy with knots sitting at zero removed.
+    ///
+    /// Intended for inspecting sparse tensors where exact zeros dominate the density and
+    /// hide the shape of everything else.
+    ///
+    /// The surviving knots are re-run through the shared compressor, which renormalizes
+    /// their masses back to [`MASS_QUANTA`]. Quantiles of the result are therefore quantiles
+    /// *of the nonzero subpopulation*, not of the original stream.
+    ///
+    /// One consequence is worth stating plainly: `sample_count` is storage-wide in RankKnot,
+    /// not per position, so it cannot be reduced to "the number of nonzero observations" —
+    /// that count differs per position. It is carried over unchanged and no longer agrees
+    /// with the filtered distribution. Treat a filtered digest as a shape to look at, not as
+    /// a population to count.
+    pub(crate) fn without_zeros(&mut self) -> Self {
+        self.flush();
+        let mut filtered = RankKnotStorage::with_config(&self.shape, self.config);
+        filtered.sample_count = self.sample_count;
+
+        let mut entries = Vec::with_capacity(RANK_KNOT_K);
+        let mut boundaries = [0_usize; RANK_KNOT_K - 1];
+        for (position, state) in self.states.iter().enumerate() {
+            entries.clear();
+            for index in 0..RANK_KNOT_K {
+                let mass = state.masses[index];
+                if mass == 0 || !state.values[index].is_nonzero() {
+                    continue;
+                }
+                entries.push(Entry {
+                    value: state.values[index],
+                    weight: u64::from(mass),
+                    pure: state.pure_mask & (1_u64 << index) != 0,
+                });
+            }
+
+            let target = &mut filtered.states[position];
+            if entries.is_empty() {
+                // Nothing survived. Leave the default empty state, whose queries answer 0.0,
+                // and pin the extrema to zero rather than leaving the ±inf sentinels.
+                target.min = 0.0;
+                target.max = 0.0;
+                continue;
+            }
+
+            // Prefer the original extremum when it was not itself a zero, so filtering does
+            // not pull the reported range in to the outermost surviving knot.
+            target.min = if state.min.is_nonzero() {
+                state.min
+            } else {
+                entries[0].value
+            };
+            target.max = if state.max.is_nonzero() {
+                state.max
+            } else {
+                entries[entries.len() - 1].value
+            };
+            compress_and_store(&entries, target, &mut boundaries);
+        }
+        filtered
+    }
+
     /// Flush pending rows and return a zstd-compressed bincode snapshot.
     ///
     /// Only the compressed summary state is persisted. Buffered rows are folded in by the
@@ -268,7 +373,7 @@ impl RankKnotStorage {
             format_version: RANK_KNOT_FORMAT_VERSION,
             knot_count: RANK_KNOT_K as u32,
             mass_quanta: MASS_QUANTA,
-            dtype_tag: <f32 as crate::TensorValue>::DTYPE_TAG,
+            dtype_tag: T::DTYPE_TAG,
             shape: self.shape.clone(),
             sample_count: self.sample_count,
             values,
@@ -315,7 +420,7 @@ impl RankKnotStorage {
                 snapshot.knot_count, snapshot.mass_quanta
             )));
         }
-        let expected_tag = <f32 as crate::TensorValue>::DTYPE_TAG;
+        let expected_tag = T::DTYPE_TAG;
         if snapshot.dtype_tag != expected_tag {
             return Err(invalid_data(format!(
                 "dtype mismatch: snapshot contains tag {} but expected {expected_tag}",
@@ -413,19 +518,19 @@ fn collect_support(state: &RankKnotState, output: &mut Vec<Entry>) {
     }
 }
 
-impl sealed::Kernel<f32> for RankKnot {
-    type Storage = RankKnotStorage;
+impl<T: TensorValue> sealed::Kernel<T> for RankKnot {
+    type Storage = RankKnotStorage<T>;
 
-    fn create_storage(shape: &[usize], config: RankKnotConfig) -> Self::Storage {
+    fn create_storage(shape: &[usize], config: <Self as DigestKernel<T>>::Config) -> Self::Storage {
         RankKnotStorage::with_config(shape, config)
     }
 }
 
-impl DigestKernel<f32> for RankKnot {
+impl<T: TensorValue> DigestKernel<T> for RankKnot {
     type Config = RankKnotConfig;
 }
 
-impl StorageOperations<f32> for RankKnotStorage {
+impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     fn numel(&self) -> usize {
         self.numel
     }
@@ -439,7 +544,7 @@ impl StorageOperations<f32> for RankKnotStorage {
         Ok(self.sample_count.min(u32::MAX as u64) as u32)
     }
 
-    fn update(&mut self, data: &[f32]) -> Result<()> {
+    fn update(&mut self, data: &[T]) -> Result<()> {
         check_sample_len(data.len(), self.numel)?;
         let start = self.n_buffered * self.numel;
         self.row_buffer[start..start + self.numel].copy_from_slice(data);
@@ -466,9 +571,11 @@ impl StorageOperations<f32> for RankKnotStorage {
                 || RankKnotScratch::new(rows),
                 |scratch, (position, state)| {
                     scratch.incoming.clear();
+                    // The buffer holds raw `T`; project this position's column to `f32`,
+                    // which is the resolution every downstream step works in.
                     scratch
                         .incoming
-                        .extend(buffer.chunks_exact(numel).map(|row| row[position]));
+                        .extend(buffer.chunks_exact(numel).map(|row| row[position].to_f32()));
                     scratch
                         .incoming
                         .sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
@@ -481,16 +588,13 @@ impl StorageOperations<f32> for RankKnotStorage {
                         &scratch.incoming,
                         &mut scratch.entries,
                     );
-                    state.min = if old_count == 0 {
-                        minimum
+                    if old_count == 0 {
+                        state.min = minimum;
+                        state.max = maximum;
                     } else {
-                        min_value(state.min, minimum)
-                    };
-                    state.max = if old_count == 0 {
-                        maximum
-                    } else {
-                        max_value(state.max, maximum)
-                    };
+                        update_min(&mut state.min, minimum);
+                        update_max(&mut state.max, maximum);
+                    }
                     compress_and_store(&scratch.entries, state, &mut scratch.boundaries);
                 },
             );
@@ -537,42 +641,52 @@ impl StorageOperations<f32> for RankKnotStorage {
     }
 
     fn analyze(&mut self) -> Result<Vec<crate::Distribution>> {
-        unsupported("RankKnot", "analyze")
+        self.flush();
+        Ok(self
+            .states
+            .par_iter()
+            .map(|state| {
+                if state.masses[0] == 0 {
+                    return crate::Distribution::Unknown;
+                }
+                crate::distribution::classify(|q| query(state, q))
+            })
+            .collect())
     }
 
     fn without_zeros(&mut self) -> Result<Self> {
-        unsupported("RankKnot", "without_zeros")
+        Ok(RankKnotStorage::without_zeros(self))
     }
 
     fn to_bytes(&mut self) -> Result<Vec<u8>>
     where
-        f32: serde::Serialize,
+        T: serde::Serialize,
     {
         RankKnotStorage::to_bytes(self)
     }
 
     fn from_bytes(bytes: &[u8]) -> Result<Self>
     where
-        f32: serde::de::DeserializeOwned,
+        T: serde::de::DeserializeOwned,
     {
         RankKnotStorage::from_bytes(bytes)
     }
 
     fn from_payload(payload: &[u8]) -> Result<Self>
     where
-        f32: serde::de::DeserializeOwned,
+        T: serde::de::DeserializeOwned,
     {
         RankKnotStorage::from_payload(payload)
     }
 
     #[cfg(feature = "visualize")]
     fn visualize(&mut self) -> Result<()> {
-        unsupported("RankKnot", "visualize")
+        crate::server::serve(self)
     }
 
     #[cfg(feature = "visualize")]
-    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> Result<()> {
-        unsupported("RankKnot", "visualize_until")
+    fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> Result<()> {
+        crate::server::serve_until(self, stop)
     }
 }
 
@@ -655,6 +769,11 @@ fn compress_and_store(
         max: state.max,
         ..RankKnotState::default()
     };
+    if total == 0 {
+        // No weighted support to normalize against. The reset state above is already the
+        // correct empty summary.
+        return;
+    }
 
     let mut start = 0;
     let mut pending: Option<Entry> = None;
@@ -730,7 +849,18 @@ fn store_representative(
     output_index: &mut usize,
 ) {
     *cumulative = cumulative.saturating_add(representative.weight);
-    let prefix = round_div_ties_even(*cumulative, total / MASS_QUANTA);
+    // Rescale the running prefix onto the 0..=MASS_QUANTA axis.
+    //
+    // The obvious `cumulative / (total / MASS_QUANTA)` is only correct when `total` is an
+    // exact multiple of `MASS_QUANTA`. That holds for ingestion and for merge, where every
+    // contribution weighs a full quantum, but not for a filtered subset such as
+    // `without_zeros`, where the surviving mass is a fraction of one quantum and the divisor
+    // collapses to zero. Multiply first instead, in `u128` because `total` can approach
+    // 2^48 and the product would otherwise overflow `u64`.
+    let prefix = round_div_ties_even(
+        u128::from(*cumulative) * u128::from(MASS_QUANTA),
+        u128::from(total),
+    ) as u64;
     let encoded = prefix - *previous_prefix;
     *previous_prefix = prefix;
     if encoded == 0 {
@@ -813,7 +943,7 @@ fn arcsine_targets() -> &'static [f64; RANK_KNOT_K - 1] {
     })
 }
 
-fn round_div_ties_even(numerator: u64, denominator: u64) -> u64 {
+fn round_div_ties_even(numerator: u128, denominator: u128) -> u128 {
     let quotient = numerator / denominator;
     let remainder = numerator % denominator;
     let half = denominator / 2;
@@ -896,19 +1026,17 @@ fn interpolate(left_q: f64, left: f32, right_q: f64, right: f32, q: f64) -> f32 
     (left as f64 + (right as f64 - left as f64) * fraction) as f32
 }
 
-fn min_value(left: f32, right: f32) -> f32 {
-    if left.total_cmp(&right).is_le() {
-        left
-    } else {
-        right
+#[inline]
+fn update_min<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate < *current {
+        *current = candidate;
     }
 }
 
-fn max_value(left: f32, right: f32) -> f32 {
-    if left.total_cmp(&right).is_ge() {
-        left
-    } else {
-        right
+#[inline]
+fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
+    if candidate > *current {
+        *current = candidate;
     }
 }
 
@@ -937,7 +1065,7 @@ mod tests {
         tamper(&mut snapshot);
 
         let tampered = bincode2::serialize(&snapshot).expect("reserialization failed");
-        let Err(error) = RankKnotStorage::from_payload(&tampered) else {
+        let Err(error) = RankKnotStorage::<f32>::from_payload(&tampered) else {
             panic!("tampered snapshot must be rejected");
         };
         assert!(error.is_invalid_snapshot(), "unexpected error: {error}");

@@ -31,7 +31,13 @@ consistent:
   `numel`, `shape`). Do not wrap them in `Result` for uniformity's sake.
 - A kernel that does not implement an operation returns `Error::Unsupported` rather than
   `unimplemented!()`. Tooling that iterates over backends relies on this to skip a kernel
-  instead of crashing the run.
+  instead of crashing the run. TDigest and RankKnot implement the whole contract; only
+  Quantile Spine still reports `Unsupported`.
+
+Shared, kernel-independent logic belongs outside the kernels. Distribution classification
+lives in `src/distribution.rs` and takes a quantile closure; the HTTP visualizer in
+`src/server/` is generic over `StorageOperations`. Neither should gain a kernel-specific
+branch — if a kernel can answer rank queries and merge, it gets both for free.
 
 NaN input is a documented precondition of `update`, not a checked one; it is not validated
 on the hot path and panics during a later flush.
@@ -43,5 +49,16 @@ This is a Rust workspace using the 2024 edition: the `monatq` library (entry poi
 and are selected statically through the sealed `DigestKernel` trait; not every kernel
 implements every operation.
 
+`TensorDigest<T, K>` defaults to `K = RankKnot`, and the Python constructor defaults to
+`kernel="rankknot"`. TDigest remains fully supported and is selected explicitly. Snapshots
+are self-describing: `monatq::from_bytes` detects kernel and dtype, while typed loaders
+reject a snapshot from another kernel.
+
+The Python bindings reify the (element type, kernel) matrix into a four-arm `Inner` enum
+dispatched by the `dispatch!` / `dispatch_rewrap!` macros. Add a method to `Inner` using
+those macros rather than writing a fresh four-way `match`.
+
 Note that `cargo build -p monatq-py` fails at link time outside maturin (undefined
-`_PyExc_*`); use `cargo check -p monatq-py` to validate the bindings.
+`_PyExc_*`); use `cargo check -p monatq-py` to validate the bindings. To run the Python
+tests: `cd monatq-py && maturin develop --release && python -m pytest tests/`. The `torch`
+tests are skipped unless torch is installed.

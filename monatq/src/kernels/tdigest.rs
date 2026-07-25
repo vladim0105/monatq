@@ -1,12 +1,11 @@
 use rayon::prelude::*;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
-use strum::IntoEnumIterator;
 use wide::f32x8;
 
 use crate::{
     TensorValue,
-    distribution::{Distribution, N_PADDED, probe_points, ref_profiles},
+    distribution::Distribution,
     kernels::{DigestKernel, TDigest, TDigestConfig, sealed},
     tensor_digest::StorageOperations,
 };
@@ -462,11 +461,11 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     }
     #[cfg(feature = "visualize")]
     fn visualize(&mut self) -> crate::Result<()> {
-        TDigestStorage::visualize(self).map_err(crate::Error::Io)
+        TDigestStorage::visualize(self)
     }
     #[cfg(feature = "visualize")]
     fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> crate::Result<()> {
-        TDigestStorage::visualize_until(self, stop).map_err(crate::Error::Io)
+        TDigestStorage::visualize_until(self, stop)
     }
 }
 
@@ -489,13 +488,13 @@ impl<T: TensorValue> TDigestStorage<T> {
     /// Launch a blocking HTTP visualizer server.
     /// Default port: 7777. Override with the `MONATQ_PORT` environment variable.
     #[cfg(feature = "visualize")]
-    pub fn visualize(&mut self) -> std::io::Result<()> {
+    pub fn visualize(&mut self) -> crate::Result<()> {
         crate::server::serve(self)
     }
 
     /// Launch a blocking HTTP visualizer server that exits when `stop` is set.
     #[cfg(feature = "visualize")]
-    pub fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
+    pub fn visualize_until(&mut self, stop: &AtomicBool) -> crate::Result<()> {
         crate::server::serve_until(self, stop)
     }
 
@@ -556,17 +555,6 @@ impl<T: TensorValue> TDigestStorage<T> {
     }
 }
 
-fn l1_simd(a: &[f32; N_PADDED], b: &[f32; N_PADDED]) -> f32 {
-    let mut acc = f32x8::splat(0.0);
-    for i in (0..N_PADDED).step_by(8) {
-        let va = f32x8::from(<[f32; 8]>::try_from(&a[i..i + 8]).unwrap());
-        let vb = f32x8::from(<[f32; 8]>::try_from(&b[i..i + 8]).unwrap());
-        let diff = va - vb;
-        acc += diff.max(-diff);
-    }
-    acc.reduce_add()
-}
-
 fn analyze_element(
     means: &[f32],
     weights: &[u32],
@@ -574,39 +562,12 @@ fn analyze_element(
     min_v: f32,
     max_v: f32,
 ) -> Distribution {
-    const D_U: f32 = 10.8;
-
     if means.is_empty() {
         return Distribution::Unknown;
     }
-
-    let med = quantile_from_centroids(means, weights, total_weight, min_v, max_v, 0.5);
-    let std = (quantile_from_centroids(means, weights, total_weight, min_v, max_v, 0.84)
-        - quantile_from_centroids(means, weights, total_weight, min_v, max_v, 0.16))
-        / 2.0;
-
-    if std.abs() < 1e-6 {
-        return Distribution::Unknown;
-    }
-
-    let probes = probe_points();
-    let mut emp = [0f32; N_PADDED];
-    for (i, &p) in probes.iter().enumerate() {
-        emp[i] =
-            (quantile_from_centroids(means, weights, total_weight, min_v, max_v, p) - med) / std;
-    }
-
-    let profiles = ref_profiles();
-    let (best, best_dist) = Distribution::iter()
-        .map(|d| (d, l1_simd(&emp, &profiles.0[d.index()])))
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .unwrap();
-
-    if best_dist > D_U {
-        Distribution::Unknown
-    } else {
-        best
-    }
+    crate::distribution::classify(|q| {
+        quantile_from_centroids(means, weights, total_weight, min_v, max_v, q)
+    })
 }
 
 #[inline]

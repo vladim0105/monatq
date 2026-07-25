@@ -68,19 +68,27 @@ fn runtime_dtype_autodetection_from_bytes() {
     let mut f32_digest = make_f32_digest();
     let f32_bytes = f32_digest.to_bytes().expect("f32 serialization failed");
     match monatq::from_bytes(&f32_bytes).expect("f32 autodetection failed") {
-        AnyTensorDigest::F32(mut loaded) => {
+        AnyTensorDigest::TDigestF32(mut loaded) => {
             assert_eq!(loaded.quantile(0.5), f32_digest.quantile(0.5));
         }
-        AnyTensorDigest::I32(_) => panic!("f32 snapshot was detected as i32"),
+        other => panic!(
+            "expected a TDigest f32 snapshot, got {} {}",
+            other.kernel_name(),
+            other.dtype_name()
+        ),
     }
 
     let mut i32_digest = make_i32_digest();
     let i32_bytes = i32_digest.to_bytes().expect("i32 serialization failed");
     match monatq::from_bytes(&i32_bytes).expect("i32 autodetection failed") {
-        AnyTensorDigest::I32(mut loaded) => {
+        AnyTensorDigest::TDigestI32(mut loaded) => {
             assert_eq!(loaded.quantile(0.5), i32_digest.quantile(0.5));
         }
-        AnyTensorDigest::F32(_) => panic!("i32 snapshot was detected as f32"),
+        other => panic!(
+            "expected a TDigest i32 snapshot, got {} {}",
+            other.kernel_name(),
+            other.dtype_name()
+        ),
     }
 }
 
@@ -101,8 +109,12 @@ fn file_and_bytes_formats_are_cross_compatible() {
     let loaded_from_memory_bytes = monatq::load(&path).expect("load failed");
     std::fs::remove_file(&path).ok();
     match loaded_from_memory_bytes {
-        AnyTensorDigest::F32(mut loaded) => assert_eq!(loaded.quantile(0.5), expected),
-        AnyTensorDigest::I32(_) => panic!("f32 snapshot was detected as i32"),
+        AnyTensorDigest::TDigestF32(mut loaded) => assert_eq!(loaded.quantile(0.5), expected),
+        other => panic!(
+            "expected a TDigest f32 snapshot, got {} {}",
+            other.kernel_name(),
+            other.dtype_name()
+        ),
     }
 }
 
@@ -137,30 +149,29 @@ fn typed_from_bytes_rejects_dtype_mismatch() {
 #[test]
 fn invalid_byte_inputs_are_rejected() {
     for bytes in [&[][..], &[1, 2, 3][..]] {
-        let error = monatq::from_bytes(bytes)
-            .err()
-            .expect("invalid input unexpectedly loaded");
+        let error = monatq::from_bytes(bytes).expect_err("invalid input unexpectedly loaded");
         assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
     }
 
     let empty_payload = zstd::encode_all(&[][..], 3).expect("compression failed");
-    let empty_error = monatq::from_bytes(&empty_payload)
-        .err()
-        .expect("empty payload unexpectedly loaded");
+    let empty_error =
+        monatq::from_bytes(&empty_payload).expect_err("empty payload unexpectedly loaded");
     assert!(
         empty_error.is_invalid_snapshot(),
         "unexpected error: {empty_error}"
     );
 
     let unknown_payload = zstd::encode_all(&[99][..], 3).expect("compression failed");
-    let unknown_error = monatq::from_bytes(&unknown_payload)
-        .err()
-        .expect("unknown dtype unexpectedly loaded");
+    let unknown_error =
+        monatq::from_bytes(&unknown_payload).expect_err("unknown dtype unexpectedly loaded");
     assert!(
         unknown_error.is_invalid_snapshot(),
         "unexpected error: {unknown_error}"
     );
-    assert!(unknown_error.to_string().contains("unknown dtype tag 99"));
+    assert!(
+        unknown_error.to_string().contains("leading tag 99"),
+        "{unknown_error}"
+    );
 
     let mut valid_digest = make_f32_digest();
     let mut truncated = valid_digest.to_bytes().expect("serialization failed");
@@ -170,5 +181,56 @@ fn invalid_byte_inputs_are_rejected() {
     assert!(
         truncated_error.is_invalid_snapshot(),
         "unexpected error: {truncated_error}"
+    );
+}
+
+#[test]
+fn autodetection_identifies_the_kernel_as_well_as_the_dtype() {
+    // All four combinations must round-trip through the untyped loader. Without kernel
+    // detection a RankKnot snapshot would be read as a t-digest whose first byte happened
+    // to be 0x52, or rejected outright.
+    let mut rk_f32 = TensorDigest::<f32, monatq::RankKnot>::new(&[2, 2]);
+    let mut rk_i32 = TensorDigest::<i32, monatq::RankKnot>::new(&[2, 2]);
+    let mut td_f32 = TensorDigest::<f32, monatq::TDigest>::new(&[2, 2]);
+    let mut td_i32 = TensorDigest::<i32, monatq::TDigest>::new(&[2, 2]);
+    for step in 0..300 {
+        let f = step as f32 * 0.25;
+        let i = step - 150;
+        rk_f32.update(&[f, -f, f * 2.0, 1.0]).unwrap();
+        rk_i32.update(&[i, -i, i * 2, 1]).unwrap();
+        td_f32.update(&[f, -f, f * 2.0, 1.0]).unwrap();
+        td_i32.update(&[i, -i, i * 2, 1]).unwrap();
+    }
+
+    let cases: [(Vec<u8>, &str, &str); 4] = [
+        (rk_f32.to_bytes().unwrap(), "RankKnot", "f32"),
+        (rk_i32.to_bytes().unwrap(), "RankKnot", "i32"),
+        (td_f32.to_bytes().unwrap(), "TDigest", "f32"),
+        (td_i32.to_bytes().unwrap(), "TDigest", "i32"),
+    ];
+    for (bytes, kernel, dtype) in cases {
+        let loaded = monatq::from_bytes(&bytes).expect("autodetection failed");
+        assert_eq!(loaded.kernel_name(), kernel);
+        assert_eq!(loaded.dtype_name(), dtype);
+        assert_eq!(loaded.shape(), &[2, 2]);
+    }
+
+    // The detected digest must actually be usable, not just correctly labelled.
+    match monatq::from_bytes(&rk_f32.to_bytes().unwrap()).unwrap() {
+        AnyTensorDigest::RankKnotF32(mut d) => {
+            assert_eq!(d.quantile(0.5), rk_f32.quantile(0.5));
+        }
+        other => panic!("expected RankKnot f32, got {}", other.kernel_name()),
+    }
+}
+
+#[test]
+fn a_payload_matching_no_kernel_is_rejected_with_a_useful_message() {
+    let junk = zstd::encode_all(&[200_u8, 1, 2, 3, 4, 5, 6, 7, 8][..], 3).unwrap();
+    let error = monatq::from_bytes(&junk).expect_err("unknown tag must be rejected");
+    assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
+    assert!(
+        error.to_string().contains("matches no known kernel"),
+        "{error}"
     );
 }

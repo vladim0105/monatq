@@ -2,7 +2,7 @@
 name = "monatq"
 version = "0.2.2"
 edition = "2024"
-description = "Approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates"
+description = "Approximate quantile tracking for tensors, with element-wise parallel updates and selectable summary kernels"
 license = "Apache-2.0"
 repository = "https://github.com/vladim0105/monatq"
 authors = ["Vladimir Monakhov"]

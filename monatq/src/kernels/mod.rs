@@ -12,11 +12,15 @@ pub struct TDigest;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuantileSpine;
 
-/// Marker selecting the f32-only RankKnot kernel.
+/// Marker selecting the RankKnot kernel.
+///
+/// Supports `f32` and `i32`. Summary state is `f32` for both, so an `i32` stream is
+/// summarised at `f32` resolution and magnitudes above 2^24 round to the nearest
+/// representable neighbour. The t-digest kernel has the same ceiling for `i32`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RankKnot;
 
-/// Configuration for the f32-only RankKnot kernel.
+/// Configuration for the RankKnot kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RankKnotConfig {
     /// Number of complete tensor samples buffered before parallel compression.

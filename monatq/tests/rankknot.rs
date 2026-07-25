@@ -521,17 +521,24 @@ fn empty_digest_roundtrips() {
 }
 
 #[test]
-fn a_rankknot_snapshot_is_rejected_by_the_tdigest_loaders() {
+fn a_rankknot_snapshot_is_never_misread_as_a_tdigest() {
     let mut original = TensorDigest::<f32, RankKnot>::new(&[1]);
     for i in 0..500 {
         original.update(&[i as f32]).unwrap();
     }
     let bytes = original.to_bytes().expect("serialization failed");
 
-    // The crate-level loader sniffs the first payload byte as a dtype tag and assumes the
-    // t-digest kernel. A distinct kernel tag must make that a clean error, never a misparse.
-    assert!(monatq::from_bytes(&bytes).is_err());
-    assert!(TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).is_err());
+    // The untyped loader detects the kernel from the leading tag, so it opens this as a
+    // RankKnot digest rather than misparsing it as a t-digest.
+    let loaded = monatq::from_bytes(&bytes).expect("kernel detection failed");
+    assert_eq!(loaded.kernel_name(), "RankKnot");
+    assert_eq!(loaded.dtype_name(), "f32");
+
+    // Asking the t-digest loader directly is still an error: detection is a convenience, not
+    // a licence to reinterpret one kernel's state as another's.
+    let error = TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes)
+        .expect_err("a RankKnot snapshot must not load as a t-digest");
+    assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
 }
 
 #[test]
@@ -551,4 +558,90 @@ fn truncated_and_empty_snapshots_are_rejected() {
             .expect_err("damaged snapshot must not load");
         assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
     }
+}
+
+// --- i32 element support -------------------------------------------------------------
+
+fn i32_digest(values: &[i32]) -> TensorDigest<i32, RankKnot> {
+    let mut td = TensorDigest::<i32, RankKnot>::new(&[1]);
+    for &value in values {
+        td.update(&[value]).unwrap();
+    }
+    td.flush();
+    td
+}
+
+#[test]
+fn i32_tensors_are_summarised_and_report_exact_extrema() {
+    let values: Vec<i32> = (-500..=500).collect();
+    let mut td = i32_digest(&values);
+
+    assert_eq!(td.sample_count(), values.len() as u64);
+    // Endpoints are stored, not interpolated, so they are exact.
+    assert_eq!(td.min()[0], -500.0);
+    assert_eq!(td.max()[0], 500.0);
+    assert_eq!(td.quantile(0.0)[0], -500.0);
+    assert_eq!(td.quantile(1.0)[0], 500.0);
+
+    // Interior quantiles land near the true rank of a uniform integer ramp.
+    let sorted: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+    for &q in &[0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
+        let error = rank_interval_error(&sorted, td.quantile(q)[0], q);
+        assert!(error < 0.01, "q={q} rank error {error}");
+    }
+}
+
+#[test]
+fn i32_digests_merge_and_round_trip_like_f32_ones() {
+    let mut td = TensorDigest::<i32, RankKnot>::new(&[4]);
+    for step in 0..200_i32 {
+        td.update(&[step, step * 2, -step, 7]).unwrap();
+    }
+
+    let mut merged = td.merge_all().unwrap();
+    assert_eq!(merged.min()[0], -199.0);
+    assert_eq!(merged.max()[0], 398.0);
+    assert_eq!(merged.sample_count(), 800);
+
+    let bytes = td.to_bytes().unwrap();
+    let mut restored = TensorDigest::<i32, RankKnot>::from_bytes(&bytes).unwrap();
+    assert_eq!(restored.shape(), td.shape());
+    assert_eq!(restored.sample_count(), td.sample_count());
+    for &q in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        assert_eq!(restored.quantile(q), td.quantile(q), "q={q}");
+    }
+}
+
+#[test]
+fn an_i32_snapshot_is_not_loadable_as_f32() {
+    let mut td = TensorDigest::<i32, RankKnot>::new(&[2]);
+    td.update(&[1, 2]).unwrap();
+    let bytes = td.to_bytes().unwrap();
+
+    // The dtype tag is what stops this; without it the payload would decode into a digest
+    // whose knots happen to be structurally valid and silently wrong.
+    let error = TensorDigest::<f32, RankKnot>::from_bytes(&bytes)
+        .expect_err("an i32 snapshot must not load as f32");
+    assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
+    assert!(error.to_string().contains("dtype mismatch"), "{error}");
+}
+
+#[test]
+fn i32_values_beyond_the_f32_mantissa_lose_exactness() {
+    // Documenting a real limit rather than asserting a guarantee the design cannot make:
+    // summary state is f32, so integers above 2^24 are not exactly representable. The
+    // t-digest kernel has the same ceiling; this test pins the behaviour so a future change
+    // to either kernel has to do so deliberately.
+    let below: i32 = (1 << 24) - 1;
+    let above: i32 = (1 << 24) + 1;
+    assert_eq!(
+        below as f32 as i32, below,
+        "2^24-1 must survive the round trip"
+    );
+    assert_ne!(above as f32 as i32, above, "2^24+1 is expected to round");
+
+    let mut td = i32_digest(&[below, above]);
+    // The extremum is stored as f32, so it reports the rounded neighbour, not `above`.
+    assert_eq!(td.max()[0], above as f32);
+    assert_eq!(td.max()[0] as i32, above - 1);
 }

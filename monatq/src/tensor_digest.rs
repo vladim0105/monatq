@@ -42,8 +42,18 @@ pub(crate) trait StorageOperations<T: TensorValue>: Sized {
 ///
 /// The marker parameter selects a concrete optimized storage layout at compile time; no
 /// runtime enum or dynamic dispatch is used.
+///
+/// `K` defaults to [`RankKnot`], which implements the full contract in 208 bytes of state
+/// per tensor position. Name a kernel explicitly to override it:
+///
+/// ```
+/// use monatq::{TDigest, TensorDigest};
+///
+/// let default_kernel = TensorDigest::<f32>::new(&[2, 2]);
+/// let t_digest = TensorDigest::<f32, TDigest>::new(&[2, 2]);
+/// ```
 #[repr(transparent)]
-pub struct TensorDigest<T: TensorValue, K: DigestKernel<T>> {
+pub struct TensorDigest<T: TensorValue, K: DigestKernel<T> = RankKnot> {
     storage: <K as kernels::sealed::Kernel<T>>::Storage,
     marker: PhantomData<(T, K)>,
 }
@@ -225,7 +235,7 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     }
 }
 
-impl TensorDigest<f32, RankKnot> {
+impl<T: TensorValue> TensorDigest<T, RankKnot> {
     /// Number of accepted samples, including samples flushed for this query.
     pub fn sample_count(&mut self) -> u64 {
         self.flush();
