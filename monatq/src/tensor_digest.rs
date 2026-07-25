@@ -90,6 +90,10 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
 }
 
 impl<T: TensorValue> TensorDigest<T, TDigest> {
+    pub fn allocated_memory_bytes(&self) -> usize {
+        self.storage.allocated_memory_bytes()
+    }
+
     pub fn analyze(&mut self) -> Vec<crate::Distribution> {
         self.storage.analyze()
     }

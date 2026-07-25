@@ -19,8 +19,6 @@ pub enum Digest {
 }
 
 impl Backend {
-    pub const BASELINE: Self = Self::TDigest;
-
     pub fn create(self, shape: &[usize]) -> Digest {
         match self {
             Self::TDigest => Digest::TDigest(TensorDigest::new(shape)),
@@ -41,6 +39,13 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.flush(),
             Self::QuantileSpine(digest) => digest.flush(),
+        }
+    }
+
+    pub fn allocated_memory_bytes(&self) -> usize {
+        match self {
+            Self::TDigest(digest) => digest.allocated_memory_bytes(),
+            Self::QuantileSpine(digest) => digest.allocated_memory_bytes(),
         }
     }
 

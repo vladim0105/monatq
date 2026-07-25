@@ -6,6 +6,7 @@ struct Accuracy {
     mean_rank_error: f64,
     max_rank_error: f64,
     worst_quantile: f32,
+    memory_bytes: usize,
 }
 
 fn xorshift32(state: &mut u32) -> f64 {
@@ -44,6 +45,7 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
         values.sort_unstable_by(f32::total_cmp);
     }
 
+    let memory_bytes = digest.allocated_memory_bytes();
     let estimates = digest.quantiles(quantiles);
     let mut sum = 0.0;
     let mut max = 0.0f64;
@@ -62,17 +64,18 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
         mean_rank_error: sum / (quantiles.len() * numel) as f64,
         max_rank_error: max,
         worst_quantile,
+        memory_bytes,
     }
 }
 
 fn print_table_header(title: &str) {
     println!("\n{title}");
-    println!("{}", "─".repeat(105));
+    println!("{}", "─".repeat(104));
     println!(
-        "{:<28}  {:<16}  {:>15}  {:>15}  {:>9}  {:>12}",
-        "Workload", "Backend", "Mean rank err", "Max rank err", "Worst q", "vs T-Digest"
+        "{:<28}  {:<16}  {:>15}  {:>25}  {:>12}",
+        "Workload", "Backend", "Mean rank err", "Max rank err (worst q)", "Memory"
     );
-    println!("{}", "─".repeat(105));
+    println!("{}", "─".repeat(104));
 }
 
 fn bold(value: String, is_best: bool) -> String {
@@ -88,12 +91,6 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
         .iter()
         .map(|&backend| (backend, measure(backend, data, numel, quantiles)))
         .collect::<Vec<_>>();
-    let baseline_mean = results
-        .iter()
-        .find(|(backend, _)| *backend == Backend::BASELINE)
-        .expect("the backend registry must contain its baseline")
-        .1
-        .mean_rank_error;
     let best_mean = results
         .iter()
         .map(|(_, accuracy)| accuracy.mean_rank_error)
@@ -102,26 +99,30 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
         .iter()
         .map(|(_, accuracy)| accuracy.max_rank_error)
         .fold(f64::INFINITY, f64::min);
+    let best_memory = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.memory_bytes)
+        .min()
+        .unwrap_or(0);
 
     for (backend, accuracy) in results {
         let backend_name = format!("{backend:?}");
-        let ratio = accuracy.mean_rank_error / baseline_mean.max(f64::EPSILON);
         let mean = bold(
             format!("{:>15.8}", accuracy.mean_rank_error),
             accuracy.mean_rank_error == best_mean,
         );
         let max = bold(
-            format!("{:>15.8}", accuracy.max_rank_error),
+            format!(
+                "{:>15.8} (q={:.3})",
+                accuracy.max_rank_error, accuracy.worst_quantile
+            ),
             accuracy.max_rank_error == best_max,
         );
-        let ratio = bold(
-            format!("{:>11.3}×", ratio),
-            accuracy.mean_rank_error == best_mean,
+        let memory = bold(
+            format!("{:>9.1} KiB", accuracy.memory_bytes as f64 / 1024.0),
+            accuracy.memory_bytes == best_memory,
         );
-        println!(
-            "{name:<28}  {backend_name:<16}  {mean}  {max}  {:>9.3}  {ratio}",
-            accuracy.worst_quantile,
-        );
+        println!("{name:<28}  {backend_name:<16}  {mean}  {max}  {memory}");
     }
     println!();
 }
@@ -231,7 +232,7 @@ fn adversarial_reports() {
 
 fn main() {
     println!("TensorDigest backend accuracy report");
-    println!("Lower errors and a lower T-Digest ratio are better.");
+    println!("Lower errors and memory use are better.");
     regular_reports();
     adversarial_reports();
 }
