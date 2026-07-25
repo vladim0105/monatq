@@ -9,13 +9,9 @@ fn digest(values: &[f32]) -> TensorDigest<f32, RankKnot> {
 }
 
 #[test]
-fn layout_and_default_memory_accounting_are_exact() {
+fn default_buffer_capacity_is_256() {
     let digest = TensorDigest::<f32, RankKnot>::new(&[17]);
     assert_eq!(digest.config().buffer_capacity, 256);
-    assert_eq!(digest.state_bytes_per_position(), 400);
-    assert_eq!(digest.state_memory_bytes(), 17 * 400);
-    assert_eq!(digest.buffer_memory_bytes(), 17 * 256 * 4);
-    assert_eq!(digest.allocated_memory_bytes(), 17 * (400 + 256 * 4) + 8);
 }
 
 #[test]

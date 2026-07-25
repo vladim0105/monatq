@@ -734,44 +734,6 @@ impl<T: TensorValue> QuantileSpineStorage<T> {
         regime(self.metadata[idx].surprise_word)
     }
 
-    /// Persistent sketch bytes (not including the reusable row buffer or shared metadata).
-    pub fn state_memory_bytes(&self) -> usize {
-        self.anchors.len() * size_of::<f32>()
-            + self.low_records.len() * size_of::<f32>()
-            + self.high_records.len() * size_of::<f32>()
-            + self.window_low_records.len() * size_of::<f32>()
-            + self.window_high_records.len() * size_of::<f32>()
-            + self.metadata.len() * size_of::<PositionMeta>()
-    }
-
-    /// Persistent state bytes per tensor position (368 with the fixed default layout).
-    pub fn state_bytes_per_position(&self) -> usize {
-        if self.numel == 0 {
-            0
-        } else {
-            self.state_memory_bytes() / self.numel
-        }
-    }
-
-    /// Reusable input and SIMD sorting-buffer bytes.
-    pub fn buffer_memory_bytes(&self) -> usize {
-        self.row_buffer.len() * size_of::<T>() + self.sort_buffer.len() * size_of::<f32>()
-    }
-
-    /// Stack object plus all currently allocated heap capacities.
-    pub fn allocated_memory_bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.shape.capacity() * size_of::<usize>()
-            + self.row_buffer.capacity() * size_of::<T>()
-            + self.sort_buffer.capacity() * size_of::<f32>()
-            + self.anchors.capacity() * size_of::<f32>()
-            + self.low_records.capacity() * size_of::<f32>()
-            + self.high_records.capacity() * size_of::<f32>()
-            + self.window_low_records.capacity() * size_of::<f32>()
-            + self.window_high_records.capacity() * size_of::<f32>()
-            + self.metadata.capacity() * size_of::<PositionMeta>()
-    }
-
     fn quantile_no_flush(&self, q: f32) -> Vec<f32> {
         match self.link {
             SpineLink::Probit => self.quantile_no_flush_for::<PROBIT_LINK>(q),
@@ -2391,12 +2353,6 @@ fn probit(probability: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn layout_matches_white_paper() {
-        let spine = QuantileSpineStorage::<f32>::with_config(&[3], QuantileSpineConfig::default());
-        assert_eq!(spine.state_bytes_per_position(), 368);
-    }
 
     #[test]
     fn probit_round_trip() {

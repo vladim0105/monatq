@@ -90,10 +90,6 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
 }
 
 impl<T: TensorValue> TensorDigest<T, TDigest> {
-    pub fn allocated_memory_bytes(&self) -> usize {
-        self.storage.allocated_memory_bytes()
-    }
-
     pub fn analyze(&mut self) -> Vec<crate::Distribution> {
         self.storage.analyze()
     }
@@ -186,22 +182,6 @@ impl TensorDigest<f32, RankKnot> {
     pub fn cell_max(&mut self, idx: usize) -> f32 {
         self.storage.cell_max(idx)
     }
-
-    pub fn state_memory_bytes(&self) -> usize {
-        self.storage.state_memory_bytes()
-    }
-
-    pub fn state_bytes_per_position(&self) -> usize {
-        self.storage.state_bytes_per_position()
-    }
-
-    pub fn buffer_memory_bytes(&self) -> usize {
-        self.storage.buffer_memory_bytes()
-    }
-
-    pub fn allocated_memory_bytes(&self) -> usize {
-        self.storage.allocated_memory_bytes()
-    }
 }
 
 impl<T: TensorValue> TensorDigest<T, QuantileSpine> {
@@ -255,21 +235,5 @@ impl<T: TensorValue> TensorDigest<T, QuantileSpine> {
 
     pub fn regime(&mut self, idx: usize) -> crate::SpineRegime {
         self.storage.regime(idx)
-    }
-
-    pub fn state_memory_bytes(&self) -> usize {
-        self.storage.state_memory_bytes()
-    }
-
-    pub fn state_bytes_per_position(&self) -> usize {
-        self.storage.state_bytes_per_position()
-    }
-
-    pub fn buffer_memory_bytes(&self) -> usize {
-        self.storage.buffer_memory_bytes()
-    }
-
-    pub fn allocated_memory_bytes(&self) -> usize {
-        self.storage.allocated_memory_bytes()
     }
 }

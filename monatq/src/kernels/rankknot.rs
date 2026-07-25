@@ -1,5 +1,4 @@
 use rayon::prelude::*;
-use std::mem::size_of;
 
 use crate::{
     kernels::{DigestKernel, RankKnot, RankKnotConfig, sealed},
@@ -31,8 +30,6 @@ impl Default for RankKnotState {
         }
     }
 }
-
-const _: () = assert!(size_of::<RankKnotState>() == 400);
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -98,24 +95,6 @@ impl RankKnotStorage {
     pub(crate) fn cell_max(&mut self, idx: usize) -> f32 {
         self.flush();
         self.states[idx].max
-    }
-
-    pub(crate) fn state_memory_bytes(&self) -> usize {
-        self.states.capacity() * size_of::<RankKnotState>()
-    }
-
-    pub(crate) const fn state_bytes_per_position(&self) -> usize {
-        size_of::<RankKnotState>()
-    }
-
-    pub(crate) fn buffer_memory_bytes(&self) -> usize {
-        self.row_buffer.capacity() * size_of::<f32>()
-    }
-
-    pub(crate) fn allocated_memory_bytes(&self) -> usize {
-        self.shape.capacity() * size_of::<usize>()
-            + self.state_memory_bytes()
-            + self.buffer_memory_bytes()
     }
 }
 
@@ -524,12 +503,6 @@ fn max_value(left: f32, right: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn persistent_state_is_exactly_400_bytes() {
-        assert_eq!(size_of::<RankKnotState>(), 400);
-        assert_eq!(std::mem::align_of::<RankKnotState>(), 8);
-    }
 
     #[test]
     fn ties_even_integer_quantization() {

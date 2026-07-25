@@ -47,14 +47,6 @@ impl Digest {
         }
     }
 
-    pub fn allocated_memory_bytes(&self) -> usize {
-        match self {
-            Self::TDigest(digest) => digest.allocated_memory_bytes(),
-            Self::QuantileSpine(digest) => digest.allocated_memory_bytes(),
-            Self::RankKnot(digest) => digest.allocated_memory_bytes(),
-        }
-    }
-
     pub fn quantile(&mut self, q: f32) -> Vec<f32> {
         match self {
             Self::TDigest(digest) => digest.quantile(q),

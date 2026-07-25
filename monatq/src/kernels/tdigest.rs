@@ -1,5 +1,4 @@
 use rayon::prelude::*;
-use std::mem::size_of;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
 use strum::IntoEnumIterator;
@@ -70,19 +69,6 @@ impl<T: TensorValue> TDigestStorage<T> {
             mins: vec![T::min_sentinel(); numel],
             maxs: vec![T::max_sentinel(); numel],
         }
-    }
-
-    /// Total heap and inline memory currently allocated by this digest.
-    pub fn allocated_memory_bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.shape.capacity() * size_of::<usize>()
-            + self.row_buffer.capacity() * size_of::<T>()
-            + self.centroids_means.capacity() * size_of::<f32>()
-            + self.centroids_weights.capacity() * size_of::<u32>()
-            + self.n_centroids.capacity() * size_of::<usize>()
-            + self.total_weights.capacity() * size_of::<u32>()
-            + self.mins.capacity() * size_of::<T>()
-            + self.maxs.capacity() * size_of::<T>()
     }
 
     /// Total number of elements (product of all shape dimensions).

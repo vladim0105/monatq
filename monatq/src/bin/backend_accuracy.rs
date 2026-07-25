@@ -192,20 +192,44 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
 
 fn print_table_header(title: &str) {
     println!("\n{title}");
-    println!("{}", "─".repeat(122));
+    println!("{}", "─".repeat(124));
     println!(
-        "{:<28}  {:<16}  {:>15}  {:>25}  {:>12}  {:>12}",
+        "{:<28}  {:<16}  {:>15}  {:>27}  {:>12}  {:>12}",
         "Workload", "Backend", "Mean rank err", "Max rank err (worst q)", "Live heap", "Peak heap"
     );
-    println!("{}", "─".repeat(122));
+    println!("{}", "─".repeat(124));
 }
 
-fn bold(value: String, is_best: bool) -> String {
-    if is_best {
-        format!("\x1b[1m{value}\x1b[0m")
+fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
+    let chroma = value * saturation;
+    let hue_sector = hue / 60.0;
+    let secondary = chroma * (1.0 - (hue_sector.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match hue_sector as u8 {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
+    };
+    let offset = value - chroma;
+    let channel = |component: f64| ((component + offset) * 255.0).round() as u8;
+    (channel(red), channel(green), channel(blue))
+}
+
+fn performance_score(value: f64, best: f64, worst: f64) -> f64 {
+    if best == worst {
+        1.0
     } else {
-        value
+        ((worst - value) / (worst - best)).clamp(0.0, 1.0)
     }
+}
+
+fn color_metric(value: String, score: f64) -> String {
+    // HSV hue 0° is red, 60° is yellow, and 120° is green.
+    let (red, green, blue) = hsv_to_rgb(120.0 * score, 1.0, 1.0);
+    let bold = if score == 1.0 { "1;" } else { "" };
+    format!("\x1b[{bold}38;2;{red};{green};{blue}m{value}\x1b[0m")
 }
 
 fn format_bytes(bytes: usize) -> String {
@@ -235,31 +259,71 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
         .map(|(_, accuracy)| accuracy.peak_heap_bytes)
         .min()
         .unwrap_or(0);
+    let worst_mean = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.mean_rank_error)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let worst_max = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.max_rank_error)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let worst_live_heap = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.live_heap_bytes)
+        .max()
+        .unwrap_or(0);
+    let worst_peak_heap = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.peak_heap_bytes)
+        .max()
+        .unwrap_or(0);
 
     for (backend, accuracy) in results {
         let backend_name = format!("{backend:?}");
-        let mean = bold(
+        let mean = color_metric(
             format!("{:>15.8}", accuracy.mean_rank_error),
-            accuracy.mean_rank_error == best_mean,
+            performance_score(accuracy.mean_rank_error, best_mean, worst_mean),
         );
-        let max = bold(
+        let max = color_metric(
             format!(
-                "{:>15.8} (q={:.3})",
+                "{:>15.8} (q={:.5})",
                 accuracy.max_rank_error, accuracy.worst_quantile
             ),
-            accuracy.max_rank_error == best_max,
+            performance_score(accuracy.max_rank_error, best_max, worst_max),
         );
-        let live_heap = bold(
+        let live_heap = color_metric(
             format!("{:>12}", format_bytes(accuracy.live_heap_bytes)),
-            accuracy.live_heap_bytes == best_live_heap,
+            performance_score(
+                accuracy.live_heap_bytes as f64,
+                best_live_heap as f64,
+                worst_live_heap as f64,
+            ),
         );
-        let peak_heap = bold(
+        let peak_heap = color_metric(
             format!("{:>12}", format_bytes(accuracy.peak_heap_bytes)),
-            accuracy.peak_heap_bytes == best_peak_heap,
+            performance_score(
+                accuracy.peak_heap_bytes as f64,
+                best_peak_heap as f64,
+                worst_peak_heap as f64,
+            ),
         );
         println!("{name:<28}  {backend_name:<16}  {mean}  {max}  {live_heap}  {peak_heap}");
     }
     println!();
+}
+
+fn laplace_sample(state: &mut u32) -> f32 {
+    let probability = xorshift32(state);
+    if probability < 0.5 {
+        (2.0 * probability).ln() as f32
+    } else {
+        (-(2.0 * (1.0 - probability)).ln()) as f32
+    }
+}
+
+fn quantize(value: f32, minimum: f32, maximum: f32, levels: usize) -> f32 {
+    let step = (maximum - minimum) / (levels - 1) as f32;
+    minimum + ((value.clamp(minimum, maximum) - minimum) / step).round() * step
 }
 
 fn regular_reports() {
@@ -272,9 +336,19 @@ fn regular_reports() {
     let uniform = Uniform::new(-2.0, 3.0).unwrap();
     let lognormal = LogNormal::new(0.0, 1.0).unwrap();
 
-    for (index, name) in ["normal", "uniform", "lognormal", "50%-zeros"]
-        .into_iter()
-        .enumerate()
+    for (index, name) in [
+        "normal",
+        "uniform",
+        "lognormal",
+        "exponential",
+        "laplace",
+        "overlapping-bimodal",
+        "32-level-normal",
+        "50%-zeros",
+        "95%-zero-activations",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let mut state = 0x6a09_e667 ^ (index as u32).wrapping_mul(0x9e37_79b9);
         let data = (0..N * NUMEL)
@@ -282,12 +356,55 @@ fn regular_reports() {
                 "normal" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
                 "uniform" => uniform.inverse_cdf(xorshift32(&mut state)) as f32,
                 "lognormal" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
-                _ if xorshift32(&mut state) < 0.5 => 0.0,
-                _ => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                "exponential" => -xorshift32(&mut state).ln() as f32,
+                "laplace" => laplace_sample(&mut state),
+                "overlapping-bimodal" => {
+                    let center = if xorshift32(&mut state) < 0.35 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    center + normal.inverse_cdf(xorshift32(&mut state)) as f32
+                }
+                "32-level-normal" => quantize(
+                    normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                    -4.0,
+                    4.0,
+                    32,
+                ),
+                "50%-zeros" if xorshift32(&mut state) < 0.5 => 0.0,
+                "50%-zeros" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                "95%-zero-activations" if xorshift32(&mut state) < 0.95 => 0.0,
+                "95%-zero-activations" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+                _ => unreachable!(),
             })
             .collect::<Vec<_>>();
         report(name, &data, NUMEL, QUANTILES);
     }
+
+    // Real tensors rarely have identically distributed positions. Mix shapes,
+    // scales, ties, and skew across positions in the same digest.
+    let mut state = 0x510e_527f;
+    let heterogeneous = (0..N * NUMEL)
+        .map(|index| {
+            let position = index % NUMEL;
+            match position % 6 {
+                0 => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                1 => (position as f32 + 1.0) * xorshift32(&mut state) as f32,
+                2 => -xorshift32(&mut state).ln() as f32,
+                3 => laplace_sample(&mut state) * (1.0 + position as f32 / 8.0),
+                4 => quantize(
+                    normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                    -3.0,
+                    3.0,
+                    16,
+                ),
+                _ if xorshift32(&mut state) < 0.8 => 0.0,
+                _ => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+            }
+        })
+        .collect::<Vec<_>>();
+    report("heterogeneous-tensor", &heterogeneous, NUMEL, QUANTILES);
 }
 
 fn coherent_stripes(n: usize, batch_len: usize, bands: usize, repeats: usize) -> Vec<f32> {
@@ -317,14 +434,48 @@ fn blocked_two_mode(n: usize, run_len: usize) -> Vec<f32> {
         .collect()
 }
 
+fn batch_edge_runs(n: usize) -> Vec<f32> {
+    let run_lengths = [255, 256, 257];
+    let mut data = Vec::with_capacity(n);
+    let mut run = 0;
+    while data.len() < n {
+        let run_len = run_lengths[run % run_lengths.len()];
+        let base = if run % 2 == 0 { -10.0 } else { 10.0 };
+        for within_run in 0..run_len.min(n - data.len()) {
+            data.push(base + within_run as f32 / run_len as f32);
+        }
+        run += 1;
+    }
+    data
+}
+
+fn repeated_regime_shifts(n: usize, segment_len: usize) -> Vec<f32> {
+    let centers = [-1_000_000.0, 0.0, 1_000_000.0, 10.0];
+    (0..n)
+        .map(|index| {
+            let segment = index / segment_len;
+            let phase = (index % segment_len) as f32 / segment_len as f32;
+            centers[segment % centers.len()] + phase
+        })
+        .collect()
+}
+
+fn adversarial_quantiles() -> Vec<f32> {
+    let mut quantiles = (1..1_000)
+        .map(|index| index as f32 / 1_000.0)
+        .collect::<Vec<_>>();
+    quantiles.extend([0.0001, 0.0005, 0.9995, 0.9999]);
+    quantiles.sort_unstable_by(f32::total_cmp);
+    quantiles.dedup();
+    quantiles
+}
+
 fn adversarial_reports() {
     print_table_header("Adversarial streams (1 tensor position)");
 
     const N: usize = 65_536;
     const BATCH_LEN: usize = 256;
-    let quantiles = (1..1_000)
-        .map(|index| index as f32 / 1_000.0)
-        .collect::<Vec<_>>();
+    let quantiles = adversarial_quantiles();
 
     let mut state = 0x6a09_e667;
     let shuffled = (0..N)
@@ -343,6 +494,65 @@ fn adversarial_reports() {
         })
         .collect::<Vec<_>>();
     report("rare-upper-atom", &rare_upper_atom, 1, &quantiles);
+
+    let mut state = 0xbb67_ae85;
+    let needle_outliers = (0..N)
+        .map(|_| {
+            let draw = xorshift32(&mut state);
+            if draw < 0.0005 {
+                1.0e30
+            } else if draw > 0.9995 {
+                -1.0e30
+            } else {
+                xorshift32(&mut state) as f32
+            }
+        })
+        .collect::<Vec<_>>();
+    report("0.1%-needle-outliers", &needle_outliers, 1, &quantiles);
+
+    let many_atoms = (0..N)
+        .map(|index| ((index * 73) % 128) as f32)
+        .collect::<Vec<_>>();
+    report("128-shuffled-atoms", &many_atoms, 1, &quantiles);
+
+    let mut state = 0x3c6e_f372;
+    let extreme_dynamic_range = (0..N)
+        .map(|index| {
+            let magnitude = match index % 3 {
+                0 => 1.0e-30,
+                1 => 1.0,
+                _ => 1.0e30,
+            };
+            let sign = if index % 2 == 0 { -1.0 } else { 1.0 };
+            sign * magnitude * xorshift32(&mut state) as f32
+        })
+        .collect::<Vec<_>>();
+    report(
+        "extreme-dynamic-range",
+        &extreme_dynamic_range,
+        1,
+        &quantiles,
+    );
+
+    report("batch-edge-runs", &batch_edge_runs(N), 1, &quantiles);
+    report(
+        "repeated-regime-shifts",
+        &repeated_regime_shifts(N, BATCH_LEN),
+        1,
+        &quantiles,
+    );
+
+    let alternating_extremes = (0..N)
+        .map(|index| {
+            let offset = index as f32 / N as f32;
+            if index % 2 == 0 {
+                -1.0e20 + offset * 1.0e18
+            } else {
+                1.0e20 + offset * 1.0e18
+            }
+        })
+        .collect::<Vec<_>>();
+    report("alternating-extremes", &alternating_extremes, 1, &quantiles);
 
     let ascending = (0..N)
         .map(|index| index as f32 / (N - 1) as f32)
@@ -370,6 +580,7 @@ fn main() {
     warm_backend_paths();
     println!("TensorDigest backend accuracy report");
     println!("Lower errors and memory use are better.");
+    println!("Metric colors interpolate in HSV from red (worst) through yellow to green (best).");
     println!(
         "Heap bytes are measured by the instrumented global allocator, not calculated from backend fields."
     );
