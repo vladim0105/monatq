@@ -99,7 +99,7 @@ fn l1_distance(a: &[f32; N_PADDED], b: &[f32; N_PADDED]) -> f32 {
     acc.reduce_add()
 }
 
-/// Distribution family identified by [`TensorDigest::analyze`].
+/// Distribution family identified by [`TensorDigest::analyze`](crate::TensorDigest::analyze).
 ///
 /// Each variant corresponds to a canonical shape matched against the empirical
 /// quantile profile via L1 distance. `Unknown` is returned when no family fits

@@ -71,13 +71,20 @@ fn handle<T: TensorValue, S: StorageOperations<T>>(
         "/api/info" => Ok(("200 OK", "application/json", json_info(shape))),
         "/api/slice" => {
             let q = parse_query(query);
-            let b = q.get("b").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            let c = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            Ok((
-                "200 OK",
-                "application/json",
-                json_slice(shape, distributions, b, c),
-            ))
+            match parse_coordinates(&q).and_then(|(b, c)| {
+                if shape.len() < 2 {
+                    Err("slice requires a tensor with at least 2 dimensions".to_string())
+                } else {
+                    channel_idx_checked(shape, b, c)
+                }
+            }) {
+                Ok(channel) => Ok((
+                    "200 OK",
+                    "application/json",
+                    json_slice(shape, distributions, channel),
+                )),
+                Err(message) => Ok(bad_request(message)),
+            }
         }
         "/api/cell" => {
             let q = parse_query(query);
@@ -99,17 +106,25 @@ fn handle<T: TensorValue, S: StorageOperations<T>>(
         }
         "/api/merge" => {
             let q = parse_query(query);
-            let b = q.get("b").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            let c = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0usize);
             let (q_lo, q_hi) = parse_quantile_window(&q);
             let exclude_zero = parse_bool_flag(&q, "exclude_zero");
             match q.get("scope").copied() {
-                Some("tensor") => digest.merge_all(),
-                Some("channel") => digest.merge_channels(&[channel_idx(shape, b, c)]),
-                _ => unreachable!(),
+                Some("tensor") => digest
+                    .merge_all()
+                    .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
+                    .map(|body| ("200 OK", "application/json", body)),
+                Some("channel") => match parse_coordinates(&q)
+                    .and_then(|(b, c)| channel_idx_checked(shape, b, c))
+                {
+                    Ok(channel) => digest
+                        .merge_channels(&[channel])
+                        .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
+                        .map(|body| ("200 OK", "application/json", body)),
+                    Err(message) => Ok(bad_request(message)),
+                },
+                Some(scope) => Ok(bad_request(format!("invalid merge scope: {scope}"))),
+                None => Ok(bad_request("missing merge scope".to_string())),
             }
-            .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
-            .map(|body| ("200 OK", "application/json", body))
         }
         _ => Ok(("404 Not Found", "text/plain", "Not Found".into())),
     };
@@ -232,13 +247,45 @@ fn parse_bool_flag(query: &HashMap<&str, &str>, key: &str) -> bool {
     matches!(query.get(key).copied(), Some("1" | "true" | "yes" | "on"))
 }
 
-/// Flat channel index for the given (b, c) coordinates within `shape`.
-fn channel_idx(shape: &[usize], b: usize, c: usize) -> usize {
-    match shape.len() {
-        0..=2 => 0,
-        3 => c,
-        _ => b * shape[1] + c,
+fn parse_coordinates(query: &HashMap<&str, &str>) -> Result<(usize, usize), String> {
+    let parse = |key| match query.get(key) {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("invalid {key} coordinate: {value}")),
+        None => Ok(0),
+    };
+    Ok((parse("b")?, parse("c")?))
+}
+
+/// Flat channel index for valid (b, c) coordinates within `shape`.
+fn channel_idx_checked(shape: &[usize], b: usize, c: usize) -> Result<usize, String> {
+    let valid = match shape.len() {
+        0..=2 => b == 0 && c == 0,
+        3 => b == 0 && c < shape[0],
+        _ => b < shape[0] && c < shape[1],
+    };
+    if !valid {
+        return Err(format!(
+            "channel coordinates b={b}, c={c} are out of range for shape {shape:?}"
+        ));
     }
+
+    match shape.len() {
+        0..=2 => Ok(0),
+        3 => Ok(c),
+        _ => b
+            .checked_mul(shape[1])
+            .and_then(|base| base.checked_add(c))
+            .ok_or_else(|| "channel index overflow".to_string()),
+    }
+}
+
+fn bad_request(message: String) -> (&'static str, &'static str, String) {
+    (
+        "400 Bad Request",
+        "application/json",
+        format!(r#"{{"error":"{}"}}"#, json_escape(&message)),
+    )
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
@@ -252,11 +299,11 @@ fn json_info(shape: &[usize]) -> String {
     format!(r#"{{"shape":[{arr}],"ndim":{}}}"#, shape.len())
 }
 
-fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usize) -> String {
+fn json_slice(shape: &[usize], distributions: &[Distribution], channel: usize) -> String {
     let ndim = shape.len();
     let (h, w) = (shape[ndim - 2], shape[ndim - 1]);
 
-    let offset = channel_idx(shape, b, c) * h * w;
+    let offset = channel * h * w;
 
     let end = (offset + h * w).min(distributions.len());
     let slice = &distributions[offset..end];
@@ -357,4 +404,52 @@ fn json_digest_merged<T: TensorValue, S: StorageOperations<T>>(
         .next()
         .unwrap_or(Distribution::Unknown);
     json_digest_cell(&mut merged, dist, "merged", q_lo, q_hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::tdigest::TDigestStorage;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+
+    fn route(shape: &[usize], target: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let mut digest = TDigestStorage::<f32>::new(shape, 100);
+        let distributions = vec![Distribution::Normal; shape.iter().product()];
+        handle(&server, shape, &distributions, &mut digest);
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn assert_bad_request(response: &str) {
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "unexpected response: {response}"
+        );
+    }
+
+    #[test]
+    fn get_merge_rejects_missing_and_invalid_scope() {
+        assert_bad_request(&route(&[1, 2, 2], "/api/merge"));
+        assert_bad_request(&route(&[1, 2, 2], "/api/merge?scope=bogus"));
+    }
+
+    #[test]
+    fn slice_rejects_too_few_dimensions_and_bad_coordinates() {
+        assert_bad_request(&route(&[4], "/api/slice"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=2&c=0"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=0&c=3"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=nope&c=0"));
+    }
 }
