@@ -1,12 +1,116 @@
 use monatq::dev_support::{BACKENDS, Backend};
 use statrs::distribution::{ContinuousCDF, LogNormal, Normal, Uniform};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+/// Process-wide allocator instrumentation for this report binary.
+///
+/// The counters track allocator-requested bytes rather than estimating the sizes
+/// of backend fields. Because Rayon allocations happen on worker threads, the
+/// instrument must be global rather than thread-local.
+struct TrackingAllocator;
+
+static LIVE_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+static PEAK_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+fn record_allocation(bytes: usize) {
+    let live = LIVE_HEAP_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    PEAK_HEAP_BYTES.fetch_max(live, Ordering::Relaxed);
+}
+
+fn record_deallocation(bytes: usize) {
+    LIVE_HEAP_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+}
+
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            record_allocation(layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+        record_deallocation(layout.size());
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let resized = unsafe { System.realloc(pointer, layout, new_size) };
+        if !resized.is_null() {
+            if new_size >= layout.size() {
+                record_allocation(new_size - layout.size());
+            } else {
+                record_deallocation(layout.size() - new_size);
+            }
+        }
+        resized
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeapMeasurement {
+    live_bytes: usize,
+    peak_bytes: usize,
+}
+
+fn begin_heap_measurement() -> usize {
+    let baseline = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    PEAK_HEAP_BYTES.store(baseline, Ordering::Relaxed);
+    baseline
+}
+
+fn finish_heap_measurement(baseline: usize) -> HeapMeasurement {
+    HeapMeasurement {
+        live_bytes: LIVE_HEAP_BYTES
+            .load(Ordering::Relaxed)
+            .saturating_sub(baseline),
+        peak_bytes: PEAK_HEAP_BYTES
+            .load(Ordering::Relaxed)
+            .saturating_sub(baseline),
+    }
+}
+
+fn warm_parallel_runtime() {
+    // Initialize Rayon's global pool before opening a backend measurement region.
+    // Otherwise one-time runtime allocations would be charged to the first backend.
+    rayon::broadcast(|_| std::hint::black_box(Vec::<u8>::with_capacity(64)));
+}
+
+fn warm_backend_paths() {
+    // Exercise each backend once so global lazy initialization is not mistaken for
+    // memory owned by the first measured digest.
+    for &backend in BACKENDS {
+        let mut digest = backend.create(&[1]);
+        for index in 0..512 {
+            digest.update(&[(index as f32 * 0.125).sin()]);
+        }
+        digest.flush();
+        std::hint::black_box(digest.quantile(0.5));
+    }
+}
 
 #[derive(Debug)]
 struct Accuracy {
     mean_rank_error: f64,
     max_rank_error: f64,
     worst_quantile: f32,
-    memory_bytes: usize,
+    live_heap_bytes: usize,
+    peak_heap_bytes: usize,
 }
 
 fn xorshift32(state: &mut u32) -> f64 {
@@ -33,19 +137,26 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
     let mut truth = (0..numel)
         .map(|_| Vec::with_capacity(data.len() / numel))
         .collect::<Vec<_>>();
-    let mut digest = backend.create(&[numel]);
     for sample in data.chunks_exact(numel) {
-        digest.update(sample);
         for (position, &value) in sample.iter().enumerate() {
             truth[position].push(value);
         }
     }
-    digest.flush();
     for values in &mut truth {
         values.sort_unstable_by(f32::total_cmp);
     }
 
-    let memory_bytes = digest.allocated_memory_bytes();
+    // Inputs and exact truth are fully allocated before this region. Query outputs
+    // are allocated after it. The measurement therefore covers only construction,
+    // update, flush, retained backend heap, and transient ingestion workspace.
+    let baseline = begin_heap_measurement();
+    let mut digest = backend.create(&[numel]);
+    for sample in data.chunks_exact(numel) {
+        digest.update(sample);
+    }
+    digest.flush();
+    let heap = finish_heap_measurement(baseline);
+
     let estimates = digest.quantiles(quantiles);
     let mut sum = 0.0;
     let mut max = 0.0f64;
@@ -60,22 +171,33 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
             }
         }
     }
+
+    // Measure retained backend heap by observing what its destructor actually
+    // releases. This excludes any process-global lazy allocation initialized in
+    // the region. Remove the same residual from the recorded ingestion peak.
+    let before_drop = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    drop(digest);
+    let after_drop = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    let live_heap_bytes = before_drop.saturating_sub(after_drop);
+    let external_retained = heap.live_bytes.saturating_sub(live_heap_bytes);
+
     Accuracy {
         mean_rank_error: sum / (quantiles.len() * numel) as f64,
         max_rank_error: max,
         worst_quantile,
-        memory_bytes,
+        live_heap_bytes,
+        peak_heap_bytes: heap.peak_bytes.saturating_sub(external_retained),
     }
 }
 
 fn print_table_header(title: &str) {
     println!("\n{title}");
-    println!("{}", "─".repeat(104));
+    println!("{}", "─".repeat(122));
     println!(
-        "{:<28}  {:<16}  {:>15}  {:>25}  {:>12}",
-        "Workload", "Backend", "Mean rank err", "Max rank err (worst q)", "Memory"
+        "{:<28}  {:<16}  {:>15}  {:>25}  {:>12}  {:>12}",
+        "Workload", "Backend", "Mean rank err", "Max rank err (worst q)", "Live heap", "Peak heap"
     );
-    println!("{}", "─".repeat(104));
+    println!("{}", "─".repeat(122));
 }
 
 fn bold(value: String, is_best: bool) -> String {
@@ -84,6 +206,10 @@ fn bold(value: String, is_best: bool) -> String {
     } else {
         value
     }
+}
+
+fn format_bytes(bytes: usize) -> String {
+    format!("{bytes} B")
 }
 
 fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
@@ -99,9 +225,14 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
         .iter()
         .map(|(_, accuracy)| accuracy.max_rank_error)
         .fold(f64::INFINITY, f64::min);
-    let best_memory = results
+    let best_live_heap = results
         .iter()
-        .map(|(_, accuracy)| accuracy.memory_bytes)
+        .map(|(_, accuracy)| accuracy.live_heap_bytes)
+        .min()
+        .unwrap_or(0);
+    let best_peak_heap = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.peak_heap_bytes)
         .min()
         .unwrap_or(0);
 
@@ -118,17 +249,21 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
             ),
             accuracy.max_rank_error == best_max,
         );
-        let memory = bold(
-            format!("{:>9.1} KiB", accuracy.memory_bytes as f64 / 1024.0),
-            accuracy.memory_bytes == best_memory,
+        let live_heap = bold(
+            format!("{:>12}", format_bytes(accuracy.live_heap_bytes)),
+            accuracy.live_heap_bytes == best_live_heap,
         );
-        println!("{name:<28}  {backend_name:<16}  {mean}  {max}  {memory}");
+        let peak_heap = bold(
+            format!("{:>12}", format_bytes(accuracy.peak_heap_bytes)),
+            accuracy.peak_heap_bytes == best_peak_heap,
+        );
+        println!("{name:<28}  {backend_name:<16}  {mean}  {max}  {live_heap}  {peak_heap}");
     }
     println!();
 }
 
 fn regular_reports() {
-    print_table_header("Representative distributions");
+    print_table_header("Representative distributions (32 tensor positions)");
 
     const N: usize = 100_000;
     const NUMEL: usize = 32;
@@ -183,7 +318,7 @@ fn blocked_two_mode(n: usize, run_len: usize) -> Vec<f32> {
 }
 
 fn adversarial_reports() {
-    print_table_header("Adversarial streams");
+    print_table_header("Adversarial streams (1 tensor position)");
 
     const N: usize = 65_536;
     const BATCH_LEN: usize = 256;
@@ -231,8 +366,17 @@ fn adversarial_reports() {
 }
 
 fn main() {
+    warm_parallel_runtime();
+    warm_backend_paths();
     println!("TensorDigest backend accuracy report");
     println!("Lower errors and memory use are better.");
+    println!(
+        "Heap bytes are measured by the instrumented global allocator, not calculated from backend fields."
+    );
+    println!(
+        "Live is retained after flush; peak covers backend construction, update, flush, and ingestion workspace."
+    );
+    println!("Input data, exact truth, and query outputs are excluded.");
     regular_reports();
     adversarial_reports();
 }

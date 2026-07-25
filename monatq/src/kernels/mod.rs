@@ -1,4 +1,5 @@
 pub(crate) mod quantile_spine;
+pub(crate) mod rankstore;
 pub(crate) mod tdigest;
 
 use crate::{TensorValue, tensor_digest::StorageOperations};
@@ -10,6 +11,25 @@ pub struct TDigest;
 /// Marker selecting the Quantile Spine kernel.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuantileSpine;
+
+/// Marker selecting the f32-only RANKSTORE kernel.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RankStore;
+
+/// Configuration for the f32-only RANKSTORE kernel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RankStoreConfig {
+    /// Number of complete tensor samples buffered before parallel compression.
+    pub buffer_capacity: usize,
+}
+
+impl Default for RankStoreConfig {
+    fn default() -> Self {
+        Self {
+            buffer_capacity: 256,
+        }
+    }
+}
 
 /// Configuration for the T-Digest kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

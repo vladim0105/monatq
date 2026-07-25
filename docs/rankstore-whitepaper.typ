@@ -20,7 +20,7 @@
       #set text(size: 8pt, fill: muted)
       RANKSTORE · compact tensor histories for deferred analysis
       #h(1fr)
-      Research note · version 0.2
+      Research note · version 0.3
     ]
   },
   footer: context {
@@ -102,7 +102,7 @@
   for x in (2.8, 3.05, 3.2) { circle((x, 2.8), radius: .11, fill: red, stroke: none) }
   line((3.55, 2.0), (4.65, 2.0), mark: (end: ">"), stroke: 1.2pt + navy)
   rect((4.9, .45), (8.4, 3.55), radius: .15, fill: white, stroke: .8pt + gridline)
-  content((6.65, 3.2), text(weight: "bold", fill: navy)[400-byte sketch])
+  content((6.65, 3.2), text(weight: "bold", fill: navy)[400-byte state])
   for i in range(0, 12) {
     let x = 5.15 + i * .25
     let y = .8 + 1.6 * calc.sin((i + 2) * .55) * calc.sin((i + 2) * .55)
@@ -335,7 +335,7 @@
   #v(0.20in)
   #text(size: 33pt, weight: "bold", fill: navy)[RANKSTORE]
   #v(0.10in)
-  #text(size: 17pt, weight: "bold")[A 400-Byte Rank-Transport Summary]
+  #text(size: 17pt, weight: "bold")[A 400-Byte Persistent Rank Summary]
   #text(size: 17pt, weight: "bold")[for Deferred Tensor Analysis]
   #v(0.15in)
   #text(size: 11.5pt, fill: muted)[Observe every sample now; choose quantiles, groups, diagnostics, and quantization later]
@@ -345,13 +345,13 @@
   #pill([exact ties], tone: green) #h(5pt)
   #pill([cold decisions], tone: purple)
   #v(0.24in)
-  #text(size: 9.5pt)[monatq research note · version 0.2]
+  #text(size: 9.5pt)[monatq research note · version 0.3]
 ]
 
 #v(0.25in)
 #hero
 #v(0.18in)
-#callout([The proposal], [Replace the current per-position t-digest with one deterministic weighted approximation of the empirical tensor history. Sixty-four value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 400 bytes per position. Collection commits to no percentile, grouping, visualization, or quantizer; those decisions remain cold and revisable.], tone: orange)
+#callout([The proposal], [Replace the current per-position t-digest with one deterministic weighted approximation of the empirical tensor history. Sixty-four value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 400 bytes of summary state per position. The live collector also needs an input buffer and bounded flush workspace. Collection commits to no percentile, grouping, visualization, or quantizer; those decisions remain cold and revisable.], tone: orange)
 
 #v(0.12in)
 #callout([An important wording distinction], [RANKSTORE *ingests every observation*, but it does not retain every raw value. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples cannot be reconstructed or replayed.], tone: red)
@@ -367,13 +367,18 @@ RANKSTORE separates *observation* from *decision*. During collection it maintain
 
 #figure(ptq-flow, caption: [The intended scope. Every tensor observation updates the same compact state. Later consumers can choose their own grouping and decision policy without replaying the tensor stream.])
 
-The proposed state uses 400 persistent bytes per tensor position—roughly one fourteenth of the repository’s approximate 5.7 KiB t-digest allocation. It contains no dynamic histogram, separately sized atom table, heap allocation, or query-time cache. Equal values share the ordinary knot budget, and exact finite extrema remain available even though interior observations are compressed.
+The proposed summary state uses 400 bytes per tensor position—roughly one twelfth of the repository t-digest’s 4,900-byte summary state at the default compression. It is 32 bytes, or 8.7%, larger than Quantile Spine’s 368-byte summary state. It contains no dynamic histogram, separately sized atom table, per-position heap allocation, or query-time cache. Equal values share the ordinary knot budget, and exact finite extrema remain available even though interior observations are compressed.
+
+#callout([Memory scope], [The 400-byte figure is summary state, not complete live memory. With `f32` inputs, the proposed 256-row buffer adds 1,024 bytes per position. The previous comparison of 400 bytes against the t-digest’s complete 5.7 KiB allocation mixed those scopes and overstated the reduction.], tone: red)
 
 #table(
-  columns: (1.5fr, 1fr, 1fr, 1fr),
+  columns: (1.55fr, 1fr, 1fr, 1fr),
   align: (left, center, center, center),
   table.header([*Property*], [*t-digest*], [*Quantile Spine*], [*RANKSTORE*]),
-  [Persistent bytes/position], [≈ 5.7 KiB], [368 B], [400 B],
+  [Summary state/position], [4,900 B], [368 B], [400 B],
+  [`f32` input buffer/position], [800 B], [1,024 B], [1,024 B],
+  [Full sort buffer/position], [none], [1,024 B], [none proposed],
+  [Tensor-scaled live total], [≈ 5,700 B], [2,416 B], [1,424 B],
   [State primitive], [weighted centroids], [rank anchors], [weighted rank knots],
   [Repeated values], [interpolated], [anchor dependent], [retained tie interval],
   [Exact min/max], [implementation dependent], [no], [yes, by construction],
@@ -381,7 +386,9 @@ The proposed state uses 400 persistent bytes per tensor position—roughly one f
   [Cold group merge], [centroid merge], [not available], [union + same rebin],
 )
 
-#callout([Evidence status], [Held-out Python experiments show better aggregate rank accuracy than the repository t-digest on smooth, atomic, quantized, and bimodal workloads. The 16-bit state transition and `f32` representatives are simulated. Rust throughput, million-row drift, and downstream application quality remain unmeasured.], tone: green)
+The table assumes default configurations, `f32`, a 64-bit target, and large tensors over which object headers and worker-local scratch amortize. The implemented t-digest and Quantile Spine live totals are verified from allocator-instrumented `backend_accuracy` runs rather than field-size estimates; the unimplemented RANKSTORE total remains a design projection. RANKSTORE’s 1,424-byte live estimate requires gathering and sorting into per-worker scratch rather than materializing a second tensor-sized buffer. Adding such a buffer would raise it to 2,448 bytes, slightly above the current Quantile Spine total. Conversely, Quantile Spine could adopt the same worker-local strategy and reach about 1,392 bytes. The live-memory difference between those two designs is therefore an implementation choice, not an inherent RANKSTORE advantage.
+
+#callout([Evidence status], [Held-out Python experiments show better aggregate rank accuracy than the repository t-digest on smooth, atomic, quantized, and bimodal workloads. The 16-bit state transition and `f32` representatives are simulated. Rust throughput, exact live allocation, million-row drift, and downstream application quality remain unmeasured.], tone: green)
 
 = Observe now, decide later
 
@@ -419,12 +426,12 @@ An observed stream defines an empirical distribution made of point masses. RANKS
 
 Every input affects the state, but most inputs cease to be individually identifiable after compression. Any number of distinct values may enter. At most 64 locations remain exact; excess support is approximated by the same rule used for continuous data. There is no separate “number of atoms supported” configuration.
 
-== The 400-byte layout
+== The 400-byte summary-state layout
 
-All positions receive one observation at the same logical tensor update. With NaNs rejected for the whole update, the accepted sample count can live once at `TensorDigest` level. The per-position state spends its final eight bytes on exact extrema instead.
+All positions receive one observation at the same logical tensor update. With NaNs rejected for the whole update, the accepted sample count can live once at `TensorDigest` level. The per-position summary state spends its final eight bytes on exact extrema instead. Input buffering and flush workspace are separate from this layout.
 
 #intuition(
-  [Memory accounting],
+  [Summary-state accounting],
   [$ 64 dot 4 + 64 dot 2 + 8 + 8 = 400 " bytes" $],
   memory-art,
   [The four terms are `f32` locations, `u16` masses, a 64-bit tie mask, and two `f32` extrema. Zero mass identifies an unused slot.],
@@ -439,7 +446,7 @@ All positions receive one observation at the same logical tensor update. With Na
     [`masses[64]: u16`], [128], [probability quanta; active masses sum to 65,535],
     [`pure_mask: u64`], [8], [one bit per location that still represents one exact value],
     [`min`, `max`: `f32`], [8], [exact finite endpoints for later range decisions],
-    [*Total*], [*400*], [no pointers and no heap allocation],
+    [*Summary-state total*], [*400*], [no pointers and no per-position allocation],
   )
 ]
 
@@ -449,7 +456,7 @@ Per-position missingness would break the shared-count assumption and must pay an
 
 == Buffer first, compress rarely
 
-Updates append transposed values to the existing 256-row tensor buffer. A flush handles each position independently and can run in parallel:
+Updates append full row-major tensor samples to one 256-row input buffer. A flush gathers one position into worker-local scratch, then handles positions independently and in parallel:
 
 + Sort and run-length encode the new values.
 + Expand old normalized masses relative to the shared historical count.
@@ -458,7 +465,7 @@ Updates append transposed values to the existing 256-row tensor buffer. A flush 
 + Store a weighted mean for every mixed cell and a purity bit for every one-value cell.
 + Prefix-round cumulative masses back to 16 bits and update exact extrema.
 
-The hot path uses bounded arrays over roughly 320 sorted entries. There is no per-position hash table, dynamic allocation, iterative optimization, or query reconstruction.
+The hot path uses bounded arrays over roughly 320 sorted entries. This scratch scales with the worker count, not the tensor width. The proposed implementation must not retain a `numel × batch_rows` sorted copy: that extra tensor-sized buffer would add another 1,024 bytes per `f32` position. There is no per-position hash table, dynamic allocation, iterative optimization, or query reconstruction.
 
 == Tail-companded rank cells
 
@@ -647,7 +654,7 @@ struct RankStore {
 }
 ```
 
-The accepted tensor sample count and exceptional-value policy belong to `TensorDigest`, shared across all positions. Temporary flush arithmetic uses wider accumulators; persistent representatives round to `f32` only once per flush.
+The accepted tensor sample count and exceptional-value policy belong to `TensorDigest`, shared across all positions. Temporary flush arithmetic uses wider accumulators; persistent representatives round to `f32` only once per flush. With the default 256 `f32` rows, live tensor-scaled storage is therefore 400 + 1,024 = 1,424 bytes per position, not 400 bytes. Per-worker scratch and small object headers remain additional but do not scale with the number of positions.
 
 == One compressor everywhere
 
@@ -660,7 +667,7 @@ The same deterministic reducer should implement buffered flush and every cold me
   table.header([*Parameter*], [*Default*], [*Reason*]),
   [`knots`], [`64`], [fills the 400-byte packed layout],
   [`mass_quanta`], [`65535`], [full positive `u16` probability range],
-  [`batch_rows`], [`256`], [matches the existing transpose buffer],
+  [`batch_rows`], [`256`], [matches the experiment; costs 1,024 input-buffer bytes per `f32` position],
   [`rank_scale`], [`arcsine`], [balanced measured accuracy with tail emphasis],
   [`NaN`], [`reject update`], [preserves one shared count across positions],
   [`infinities`], [`explicit endpoints`], [avoid contaminating finite means],
@@ -676,7 +683,7 @@ Do not expose the mass encoding or scale function publicly until long-stream and
   columns: (1.2fr, 2.8fr),
   table.header([*Gate*], [*Requirement*]),
   [Typical accuracy], [lower aggregate mean and maximum rank error than t-digest on the preregistered representative suite],
-  [Memory], [400 persistent bytes per position and no additional tensor-sized persistent allocation],
+  [Memory], [400 bytes of summary state and at most 1,424 tensor-scaled live bytes per `f32` position at 256 rows; no tensor-sized sorted copy],
   [Hot throughput], [update and flush throughput at least as high as the current t-digest at target tensor widths],
   [Numerics], [monotone queries, finite mixed means, exact finite extrema, and no mass underflow],
   [Long streams], [no unacceptable drift through at least one million updates and repeated distribution shifts],
@@ -704,7 +711,8 @@ The consumer study should use the same collected state to compare several polici
 - *Requantization drift:* 16-bit masses buy 64 support locations but repeatedly approximate old probability. A 48-location `u32` fallback remains useful.
 - *Shared count:* rejecting an entire update because one position is NaN may not suit every caller. Per-position missingness requires a revised layout.
 - *Tail parity:* t-digest remains stronger at many individual extreme-tail queries.
-- *Fixed memory:* no 400-byte state offers tiny distribution-free error for every stream.
+- *Working memory:* the 400-byte title names summary state only. The default input buffer raises proposed live tensor-scaled storage to 1,424 bytes per `f32` position, and a full sorted copy would raise it to 2,448 bytes.
+- *Fixed memory:* no 400-byte summary state offers tiny distribution-free error for every stream.
 
 #callout([The design principle], [Collection should preserve a useful approximation of the observed distribution while making as few downstream choices as possible. RANKSTORE spends its state budget on rank mass, ties, and extrema; everything else is deferred.], tone: green)
 
@@ -721,8 +729,8 @@ The next artifact should record real tensor shapes, sample counts, throughput, s
 
 = Conclusion
 
-RANKSTORE is a compact tensor-history backend, not a quantizer. It ingests every observation into a 400-byte positive approximation, preserves retained ties and exact extrema, and allows quantiles, grouping, visualization, clipping, and quantization policies to be chosen later. In the current feasibility suite it improves broad rank accuracy and discrete behavior over the repository t-digest while using roughly one fourteenth of the persistent memory.
+RANKSTORE is a compact tensor-history backend, not a quantizer. It ingests every observation into a 400-byte positive summary state, preserves retained ties and exact extrema, and allows quantiles, grouping, visualization, clipping, and quantization policies to be chosen later. In the current feasibility suite it improves broad rank accuracy and discrete behavior over the repository t-digest. Apples-to-apples, its summary state is about one twelfth of the default t-digest state; its proposed one-buffer live tensor-scaled allocation is about one quarter of the current t-digest allocation. Its summary state is 32 bytes larger than Quantile Spine’s, so any live-memory advantage over that backend depends on avoiding Quantile Spine’s tensor-sized sort buffer.
 
-The remaining questions are operational: Rust throughput, long-stream mass drift, cold-merge fidelity, and whether real deferred consumers make decisions as good as or better than those based on t-digest. Those tests should decide the backend before its public API is stabilized.
+The remaining questions are operational: Rust throughput and exact live allocation, long-stream mass drift, cold-merge fidelity, and whether real deferred consumers make decisions as good as or better than those based on t-digest. Those tests should decide the backend before its public API is stabilized.
 
 #bibliography("references.bib", title: [References])

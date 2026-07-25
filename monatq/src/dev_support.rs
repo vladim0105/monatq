@@ -1,21 +1,23 @@
 //! Shared backend adapter for repository benchmarks and accuracy reports.
 
-use crate::{QuantileSpine, TDigest, TensorDigest};
+use crate::{QuantileSpine, RankStore, TDigest, TensorDigest};
 
 /// Digest implementations exercised by backend comparisons.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Backend {
     TDigest,
     QuantileSpine,
+    RankStore,
 }
 
 /// The single backend list used by performance and accuracy reporting.
-pub const BACKENDS: &[Backend] = &[Backend::TDigest, Backend::QuantileSpine];
+pub const BACKENDS: &[Backend] = &[Backend::TDigest, Backend::QuantileSpine, Backend::RankStore];
 
 /// Type-erased adapter used only by repository tooling.
 pub enum Digest {
     TDigest(TensorDigest<f32, TDigest>),
     QuantileSpine(TensorDigest<f32, QuantileSpine>),
+    RankStore(TensorDigest<f32, RankStore>),
 }
 
 impl Backend {
@@ -23,6 +25,7 @@ impl Backend {
         match self {
             Self::TDigest => Digest::TDigest(TensorDigest::new(shape)),
             Self::QuantileSpine => Digest::QuantileSpine(TensorDigest::new(shape)),
+            Self::RankStore => Digest::RankStore(TensorDigest::new(shape)),
         }
     }
 }
@@ -32,6 +35,7 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.update(sample),
             Self::QuantileSpine(digest) => digest.update(sample),
+            Self::RankStore(digest) => digest.update(sample),
         }
     }
 
@@ -39,6 +43,7 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.flush(),
             Self::QuantileSpine(digest) => digest.flush(),
+            Self::RankStore(digest) => digest.flush(),
         }
     }
 
@@ -46,6 +51,7 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.allocated_memory_bytes(),
             Self::QuantileSpine(digest) => digest.allocated_memory_bytes(),
+            Self::RankStore(digest) => digest.allocated_memory_bytes(),
         }
     }
 
@@ -53,6 +59,7 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.quantile(q),
             Self::QuantileSpine(digest) => digest.quantile(q),
+            Self::RankStore(digest) => digest.quantile(q),
         }
     }
 
@@ -60,6 +67,7 @@ impl Digest {
         match self {
             Self::TDigest(digest) => digest.quantiles(qs),
             Self::QuantileSpine(digest) => digest.quantiles(qs),
+            Self::RankStore(digest) => digest.quantiles(qs),
         }
     }
 }

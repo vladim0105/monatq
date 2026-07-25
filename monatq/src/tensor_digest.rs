@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     TensorValue,
-    kernels::{self, DigestKernel, QuantileSpine, TDigest},
+    kernels::{self, DigestKernel, QuantileSpine, RankStore, TDigest},
 };
 
 /// Operations shared by every kernel-specific storage layout.
@@ -157,6 +157,50 @@ impl<T: TensorValue> TensorDigest<T, TDigest> {
     #[cfg(feature = "visualize")]
     pub fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
         self.storage.visualize_until(stop)
+    }
+}
+
+impl TensorDigest<f32, RankStore> {
+    /// Number of accepted samples, including samples flushed for this query.
+    pub fn sample_count(&mut self) -> u64 {
+        self.flush();
+        self.storage.sample_count()
+    }
+
+    pub fn config(&self) -> &crate::RankStoreConfig {
+        self.storage.config()
+    }
+
+    pub fn min(&mut self) -> Vec<f32> {
+        self.storage.min()
+    }
+
+    pub fn max(&mut self) -> Vec<f32> {
+        self.storage.max()
+    }
+
+    pub fn cell_min(&mut self, idx: usize) -> f32 {
+        self.storage.cell_min(idx)
+    }
+
+    pub fn cell_max(&mut self, idx: usize) -> f32 {
+        self.storage.cell_max(idx)
+    }
+
+    pub fn state_memory_bytes(&self) -> usize {
+        self.storage.state_memory_bytes()
+    }
+
+    pub fn state_bytes_per_position(&self) -> usize {
+        self.storage.state_bytes_per_position()
+    }
+
+    pub fn buffer_memory_bytes(&self) -> usize {
+        self.storage.buffer_memory_bytes()
+    }
+
+    pub fn allocated_memory_bytes(&self) -> usize {
+        self.storage.allocated_memory_bytes()
     }
 }
 

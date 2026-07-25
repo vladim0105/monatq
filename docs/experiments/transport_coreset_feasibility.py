@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Feasibility test for a tie-aware rank-transport coreset.
 
-Two 400-byte layouts are tested. RTC-48 uses 48 packed (f32 value, u32 count)
-knots plus a purity mask and metadata. RTC-64-u16 evaluates the interior coreset used by the proposed layout: 64 f32
-values, 64 u16 probability masses, and a purity mask. The final eight bytes are
-exact f32 min/max sidecars; the sample count is shared by the parent tensor and
-is simulated by the local `seen` variable. The queried grid excludes q=0 and
-q=1, so those sidecars do not alter reported rows. Prefix rounding bounds each current mass-CDF boundary error by
+Two 400-byte summary-state layouts are tested. This figure excludes the batch
+input buffer and flush workspace. RTC-48 uses 48 packed (f32 value, u32 count)
+knots plus a purity mask and metadata. RTC-64-u16 evaluates the interior coreset
+used by the proposed layout: 64 f32 values, 64 u16 probability masses, and a
+purity mask. The final eight bytes are exact f32 min/max sidecars; the sample
+count is shared by the parent tensor and is simulated by the local `seen`
+variable. The queried grid excludes q=0 and q=1, so those sidecars do not alter
+reported rows. Prefix rounding bounds each current mass-CDF boundary error by
 1/(2*65535) per requantization.
 There is no separately sized atom table. Equal input values are indivisible;
 any number of distinct values competes for the general knot budget.
