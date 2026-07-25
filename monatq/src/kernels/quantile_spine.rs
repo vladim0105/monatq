@@ -8,7 +8,11 @@ use std::{
 };
 use wide::f32x8;
 
-use crate::TensorValue;
+use crate::{
+    TensorValue,
+    kernels::{DigestKernel, QuantileSpine, sealed},
+    tensor_digest::StorageOperations,
+};
 
 /// Number of quantile anchors in each spine.
 pub const SPINE_K: usize = 64;
@@ -101,7 +105,7 @@ impl SpineLink {
     }
 }
 
-/// Shared configuration for a [`QuantileSpine`].
+/// Shared configuration for the [`crate::QuantileSpine`] kernel.
 #[derive(Clone, Copy, Debug)]
 pub struct QuantileSpineConfig {
     /// Number of tensor samples collected before a parallel flush.
@@ -160,7 +164,7 @@ const _: () = assert!(size_of::<PositionMeta>() == 16);
 /// and one packed surprise word. All arrays are contiguous; no position performs a
 /// heap allocation. Incoming rows use the same `row_buffer[s * numel + i]` layout
 /// as [`crate::TensorDigest`], and flushes are parallel over positions.
-pub struct QuantileSpine<T: TensorValue> {
+pub struct QuantileSpineStorage<T: TensorValue> {
     shape: Vec<usize>,
     numel: usize,
     config: QuantileSpineConfig,
@@ -183,27 +187,7 @@ pub struct QuantileSpine<T: TensorValue> {
 }
 
 /// Alternate name emphasizing the tensor-oriented storage layout.
-pub type TensorSpine<T> = QuantileSpine<T>;
-
-impl<T: TensorValue> QuantileSpine<T> {
-    /// Construct a spine with the white-paper defaults (`K=64`, `T=8`,
-    /// `T_w=4`, `N_max=100_000`, and a 256-row input buffer).
-    pub fn new(shape: &[usize]) -> Self {
-        Self::with_config(shape, QuantileSpineConfig::default())
-    }
-
-    /// Construct a spine with only the fading-memory cap changed from its defaults.
-    /// Pass `u64::MAX` for a no-fading comparison.
-    pub fn with_n_max(shape: &[usize], n_max: u64) -> Self {
-        Self::with_config(
-            shape,
-            QuantileSpineConfig {
-                n_max,
-                ..QuantileSpineConfig::default()
-            },
-        )
-    }
-
+impl<T: TensorValue> QuantileSpineStorage<T> {
     /// Construct a spine with explicit shared configuration.
     pub fn with_config(shape: &[usize], config: QuantileSpineConfig) -> Self {
         assert!(
@@ -855,6 +839,48 @@ impl<T: TensorValue> QuantileSpine<T> {
         self.dither_state = x;
         let unit = (x >> 40) as f32 / (1u32 << 24) as f32;
         unit - 0.5
+    }
+}
+
+impl<T: TensorValue> StorageOperations<T> for QuantileSpineStorage<T> {
+    fn numel(&self) -> usize {
+        self.numel()
+    }
+    fn shape(&self) -> &[usize] {
+        self.shape()
+    }
+    fn total_weight(&self, idx: usize) -> u32 {
+        self.total_weight(idx)
+    }
+    fn update(&mut self, data: &[T]) {
+        self.update(data)
+    }
+    fn flush(&mut self) {
+        self.flush()
+    }
+    fn quantile(&mut self, q: f32) -> Vec<f32> {
+        self.quantile(q)
+    }
+    fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
+        self.quantiles(qs)
+    }
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+        self.cell_quantiles(idx, qs)
+    }
+}
+
+impl<T: TensorValue> DigestKernel<T> for QuantileSpine {
+    type Config = QuantileSpineConfig;
+}
+
+impl<T: TensorValue> sealed::Kernel<T> for QuantileSpine {
+    type Storage = QuantileSpineStorage<T>;
+
+    fn create_storage(
+        shape: &[usize],
+        config: <QuantileSpine as DigestKernel<T>>::Config,
+    ) -> Self::Storage {
+        QuantileSpineStorage::with_config(shape, config)
     }
 }
 
@@ -2368,7 +2394,7 @@ mod tests {
 
     #[test]
     fn layout_matches_white_paper() {
-        let spine = QuantileSpine::<f32>::new(&[3]);
+        let spine = QuantileSpineStorage::<f32>::with_config(&[3], QuantileSpineConfig::default());
         assert_eq!(spine.state_bytes_per_position(), 368);
     }
 
@@ -2413,7 +2439,7 @@ mod tests {
             link_refit_interval: 0,
             ..QuantileSpineConfig::default()
         };
-        let mut spine = QuantileSpine::with_config(&[2], config);
+        let mut spine = QuantileSpineStorage::with_config(&[2], config);
         for index in 0..1_000 {
             let value = index as f32 + 1.0;
             spine.update(&[value, 2.0 * value + 1.0]);

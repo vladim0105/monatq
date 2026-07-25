@@ -5,20 +5,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::distribution::Distribution;
-use crate::tensor_digest::TensorDigest;
+use crate::kernels::tdigest::TDigestStorage;
 use crate::tensor_value::TensorValue;
 
 static HTML: &str = include_str!("frontend.html");
 
 /// Start a blocking HTTP visualizer on `127.0.0.1:{MONATQ_PORT}` (default 7777).
 /// Calls `analyze()` internally before serving.
-pub(crate) fn serve<T: TensorValue>(digest: &mut TensorDigest<T>) -> std::io::Result<()> {
+pub(crate) fn serve<T: TensorValue>(digest: &mut TDigestStorage<T>) -> std::io::Result<()> {
     let stop = AtomicBool::new(false);
     serve_until(digest, &stop)
 }
 
 pub(crate) fn serve_until<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+    digest: &mut TDigestStorage<T>,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
     let port = std::env::var("MONATQ_PORT").unwrap_or_else(|_| "7777".to_string());
@@ -50,7 +50,7 @@ fn handle<T: TensorValue>(
     stream: &std::net::TcpStream,
     shape: &[usize],
     distributions: &[Distribution],
-    digest: &mut TensorDigest<T>,
+    digest: &mut TDigestStorage<T>,
 ) {
     let (method, path, query, body_bytes) = match parse_http_request(stream) {
         Some(r) => r,
@@ -262,7 +262,7 @@ fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usiz
 }
 
 fn json_digest_cell<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+    digest: &mut TDigestStorage<T>,
     dist: Distribution,
     label: &str,
     q_lo: f32,
@@ -295,7 +295,7 @@ fn json_digest_cell<T: TensorValue>(
 }
 
 fn json_cell<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+    digest: &mut TDigestStorage<T>,
     distributions: &[Distribution],
     idx: usize,
     q_lo: f32,
@@ -316,7 +316,7 @@ fn json_cell<T: TensorValue>(
 }
 
 fn json_digest_merged<T: TensorValue>(
-    mut merged: TensorDigest<T>,
+    mut merged: TDigestStorage<T>,
     q_lo: f32,
     q_hi: f32,
     exclude_zero: bool,

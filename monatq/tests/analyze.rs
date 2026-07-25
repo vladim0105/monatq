@@ -1,8 +1,8 @@
 use monatq::{Distribution, TensorDigest};
 use statrs::distribution::{ContinuousCDF, LogNormal, Normal, Uniform};
 
-fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32> {
-    let mut td = TensorDigest::<f32>::new(&[1], 100);
+fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32, monatq::TDigest> {
+    let mut td = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for v in values {
         td.update(&[v]);
     }
@@ -86,7 +86,7 @@ fn analyze_tensor() {
     let normal_vals = samples(&normal_dist, 2000);
     let uniform_vals = samples(&uniform_dist, 2000);
 
-    let mut td = TensorDigest::new(&[2], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2]);
     for (n, u) in normal_vals.iter().zip(uniform_vals.iter()) {
         td.update(&[*n, *u]);
     }
@@ -113,7 +113,7 @@ fn analyze_no_misclassification() {
     let uniform_vals = samples(&uniform_dist, 2000);
     let lognormal_vals = samples(&lognormal_dist, 2000);
 
-    let mut td = TensorDigest::new(&[4], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[4]);
     for i in 0..2000 {
         td.update(&[
             normal_vals[i],

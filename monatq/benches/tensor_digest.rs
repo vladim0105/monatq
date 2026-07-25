@@ -1,5 +1,5 @@
 use divan::{black_box, counter::ItemsCount};
-use monatq::{QuantileSpine, TensorDigest};
+use monatq::dev_support::{BACKENDS, Backend};
 use statrs::distribution::{ContinuousCDF, Normal, Uniform};
 
 fn main() {
@@ -31,98 +31,21 @@ fn uniform_data(len: usize) -> Vec<f32> {
 
 const SMALL_NUMEL: usize = 64 * 64;
 const SMALL_SAMPLES: usize = 1_000;
-
-#[divan::bench(sample_count = 10)]
-fn tdigest_update_64x64_1k_normal(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(SMALL_NUMEL * SMALL_SAMPLES))
-        .with_inputs(|| {
-            (
-                normal_data(SMALL_NUMEL * SMALL_SAMPLES),
-                TensorDigest::new(&[64, 64], 100),
-            )
-        })
-        .bench_values(|(data, mut digest)| {
-            for sample in data.chunks_exact(SMALL_NUMEL) {
-                digest.update(sample);
-            }
-            digest.flush();
-            black_box((data, digest))
-        });
-}
-
-#[divan::bench(sample_count = 10)]
-fn spine_update_64x64_1k_normal(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(SMALL_NUMEL * SMALL_SAMPLES))
-        .with_inputs(|| {
-            (
-                normal_data(SMALL_NUMEL * SMALL_SAMPLES),
-                QuantileSpine::new(&[64, 64]),
-            )
-        })
-        .bench_values(|(data, mut spine)| {
-            for sample in data.chunks_exact(SMALL_NUMEL) {
-                spine.update(sample);
-            }
-            spine.flush();
-            black_box((data, spine))
-        });
-}
-
-#[divan::bench(sample_count = 10)]
-fn tdigest_update_64x64_1k_uniform(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(SMALL_NUMEL * SMALL_SAMPLES))
-        .with_inputs(|| {
-            (
-                uniform_data(SMALL_NUMEL * SMALL_SAMPLES),
-                TensorDigest::new(&[64, 64], 100),
-            )
-        })
-        .bench_values(|(data, mut digest)| {
-            for sample in data.chunks_exact(SMALL_NUMEL) {
-                digest.update(sample);
-            }
-            digest.flush();
-            black_box((data, digest))
-        });
-}
-
-#[divan::bench(sample_count = 10)]
-fn spine_update_64x64_1k_uniform(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(SMALL_NUMEL * SMALL_SAMPLES))
-        .with_inputs(|| {
-            (
-                uniform_data(SMALL_NUMEL * SMALL_SAMPLES),
-                QuantileSpine::new(&[64, 64]),
-            )
-        })
-        .bench_values(|(data, mut spine)| {
-            for sample in data.chunks_exact(SMALL_NUMEL) {
-                spine.update(sample);
-            }
-            spine.flush();
-            black_box((data, spine))
-        });
-}
-
-const LARGE_NUMEL: usize = 256 * 256;
 const LARGE_SAMPLES: usize = 200;
 
-#[divan::bench(sample_count = 5)]
-fn tdigest_update_256x256_200_uniform(bencher: divan::Bencher) {
+fn bench_update(
+    bencher: divan::Bencher,
+    backend: Backend,
+    shape: &'static [usize],
+    samples: usize,
+    make_data: fn(usize) -> Vec<f32>,
+) {
+    let numel = shape.iter().product::<usize>();
     bencher
-        .counter(ItemsCount::new(LARGE_NUMEL * LARGE_SAMPLES))
-        .with_inputs(|| {
-            (
-                uniform_data(LARGE_NUMEL * LARGE_SAMPLES),
-                TensorDigest::new(&[256, 256], 100),
-            )
-        })
+        .counter(ItemsCount::new(numel * samples))
+        .with_inputs(|| (make_data(numel * samples), backend.create(shape)))
         .bench_values(|(data, mut digest)| {
-            for sample in data.chunks_exact(LARGE_NUMEL) {
+            for sample in data.chunks_exact(numel) {
                 digest.update(sample);
             }
             digest.flush();
@@ -130,32 +53,28 @@ fn tdigest_update_256x256_200_uniform(bencher: divan::Bencher) {
         });
 }
 
-#[divan::bench(sample_count = 5)]
-fn spine_update_256x256_200_uniform(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(LARGE_NUMEL * LARGE_SAMPLES))
-        .with_inputs(|| {
-            (
-                uniform_data(LARGE_NUMEL * LARGE_SAMPLES),
-                QuantileSpine::new(&[256, 256]),
-            )
-        })
-        .bench_values(|(data, mut spine)| {
-            for sample in data.chunks_exact(LARGE_NUMEL) {
-                spine.update(sample);
-            }
-            spine.flush();
-            black_box((data, spine))
-        });
+#[divan::bench(args = BACKENDS, sample_count = 10)]
+fn update_64x64_1k_normal(bencher: divan::Bencher, backend: Backend) {
+    bench_update(bencher, backend, &[64, 64], SMALL_SAMPLES, normal_data);
 }
 
-#[divan::bench(sample_count = 20)]
-fn tdigest_query_64x64_p99(bencher: divan::Bencher) {
+#[divan::bench(args = BACKENDS, sample_count = 10)]
+fn update_64x64_1k_uniform(bencher: divan::Bencher, backend: Backend) {
+    bench_update(bencher, backend, &[64, 64], SMALL_SAMPLES, uniform_data);
+}
+
+#[divan::bench(args = BACKENDS, sample_count = 5)]
+fn update_256x256_200_uniform(bencher: divan::Bencher, backend: Backend) {
+    bench_update(bencher, backend, &[256, 256], LARGE_SAMPLES, uniform_data);
+}
+
+#[divan::bench(args = BACKENDS, sample_count = 20)]
+fn query_64x64_p99(bencher: divan::Bencher, backend: Backend) {
     bencher
         .counter(ItemsCount::new(SMALL_NUMEL))
         .with_inputs(|| {
             let data = uniform_data(SMALL_NUMEL * SMALL_SAMPLES);
-            let mut digest = TensorDigest::new(&[64, 64], 100);
+            let mut digest = backend.create(&[64, 64]);
             for sample in data.chunks_exact(SMALL_NUMEL) {
                 digest.update(sample);
             }
@@ -165,24 +84,5 @@ fn tdigest_query_64x64_p99(bencher: divan::Bencher) {
         .bench_values(|mut digest| {
             let result = digest.quantile(0.99);
             black_box((digest, result))
-        });
-}
-
-#[divan::bench(sample_count = 20)]
-fn spine_query_64x64_p99(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(SMALL_NUMEL))
-        .with_inputs(|| {
-            let data = uniform_data(SMALL_NUMEL * SMALL_SAMPLES);
-            let mut spine = QuantileSpine::new(&[64, 64]);
-            for sample in data.chunks_exact(SMALL_NUMEL) {
-                spine.update(sample);
-            }
-            spine.flush();
-            spine
-        })
-        .bench_values(|mut spine| {
-            let result = spine.quantile(0.99);
-            black_box((spine, result))
         });
 }

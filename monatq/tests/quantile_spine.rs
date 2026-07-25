@@ -1,3 +1,4 @@
+use monatq::TensorDigest;
 use monatq::{QuantileSpine, QuantileSpineConfig, SpineLink, SpineRegime};
 use statrs::distribution::{ContinuousCDF, LogNormal, Normal, Uniform};
 
@@ -8,8 +9,11 @@ fn xorshift32(state: &mut u32) -> f64 {
     ((*state as f64) + 0.5) / (u32::MAX as f64 + 1.0)
 }
 
-fn feed_distribution<D: ContinuousCDF<f64, f64>>(dist: &D, n: usize) -> QuantileSpine<f32> {
-    let mut spine = QuantileSpine::new(&[1]);
+fn feed_distribution<D: ContinuousCDF<f64, f64>>(
+    dist: &D,
+    n: usize,
+) -> TensorDigest<f32, QuantileSpine> {
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     let mut state = 0x8bad_f00d;
     for _ in 0..n {
         spine.update(&[dist.inverse_cdf(xorshift32(&mut state)) as f32]);
@@ -43,7 +47,7 @@ fn rank_interval_error(sorted: &[f32], estimate: f32, q: f32) -> f32 {
 }
 
 fn mean_empirical_rank_error(
-    spine: &mut QuantileSpine<f32>,
+    spine: &mut TensorDigest<f32, QuantileSpine>,
     truth: &[Vec<f32>],
     quantiles: &[f32],
 ) -> f32 {
@@ -62,7 +66,7 @@ fn early_life_is_exact() {
     let values = [8.0, -3.0, 4.0, 4.5, 100.0, 0.0, 7.0, 2.0, -9.0];
     let mut sorted = values;
     sorted.sort_by(f32::total_cmp);
-    let mut spine = QuantileSpine::new(&[1]);
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     for value in values {
         spine.update(&[value]);
     }
@@ -78,7 +82,7 @@ fn all_time_record_shelves_are_exact() {
     let n = 2_000usize;
     let mut state = 0x1234_5678;
     let mut values = Vec::with_capacity(n);
-    let mut spine = QuantileSpine::new(&[1]);
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     for _ in 0..n {
         let value = (xorshift32(&mut state) * 10_000.0) as f32;
         values.push(value);
@@ -100,7 +104,7 @@ fn all_time_record_shelves_are_exact() {
 
 #[test]
 fn zero_counter_and_zero_atom_are_exact() {
-    let mut spine = QuantileSpine::new(&[1]);
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     for i in 0..1_000 {
         let value = if i % 2 == 0 { 0.0 } else { i as f32 + 1.0 };
         spine.update(&[value]);
@@ -114,7 +118,7 @@ fn zero_counter_and_zero_atom_are_exact() {
 
 #[test]
 fn secondary_atom_is_promoted_and_counted() {
-    let mut spine = QuantileSpine::new(&[1]);
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     for i in 0..2_000 {
         let value = if i % 3 == 0 {
             7.0
@@ -138,7 +142,7 @@ fn mature_secondary_atom_requires_consecutive_tied_batches() {
         atom_threshold: 0.5,
         ..QuantileSpineConfig::default()
     };
-    let mut spine = QuantileSpine::with_config(&[1], config);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[1], config);
     for i in 0..80 {
         spine.update(&[i as f32 + 10.0]);
     }
@@ -170,7 +174,7 @@ fn quantile_rank_accuracy_lognormal() {
 
 #[test]
 fn surprise_gain_tracks_an_abrupt_regime_change() {
-    let mut spine = QuantileSpine::new(&[1]);
+    let mut spine = TensorDigest::<_, QuantileSpine>::new(&[1]);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let mut state = 0xfeed_beef;
     for _ in 0..20_000 {
@@ -196,7 +200,7 @@ fn sustained_surprise_restarts_windowed_records() {
         n_max: u64::MAX,
         ..QuantileSpineConfig::default()
     };
-    let mut spine = QuantileSpine::with_config(&[1], config);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[1], config);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let mut state = 0xa54f_f53a;
     for _ in 0..4_096 {
@@ -224,8 +228,8 @@ fn finite_memory_adapts_faster_than_no_fading() {
     let mut infinite_config = fading_config;
     infinite_config.n_max = u64::MAX;
 
-    let mut fading = QuantileSpine::with_config(&[1], fading_config);
-    let mut no_fading = QuantileSpine::with_config(&[1], infinite_config);
+    let mut fading = TensorDigest::<_, QuantileSpine>::with_config(&[1], fading_config);
+    let mut no_fading = TensorDigest::<_, QuantileSpine>::with_config(&[1], infinite_config);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let mut state = 0x0ddc_0ffe;
     for _ in 0..20_000 {
@@ -262,8 +266,8 @@ fn shared_ruler_selects_linear_and_improves_uniform_accuracy() {
         link_refit_interval: 0,
         ..adaptive_config
     };
-    let mut adaptive = QuantileSpine::with_config(&[POSITIONS], adaptive_config);
-    let mut fixed = QuantileSpine::with_config(&[POSITIONS], fixed_config);
+    let mut adaptive = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], adaptive_config);
+    let mut fixed = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], fixed_config);
     let uniform = Uniform::new(-3.0, 9.0).unwrap();
     let mut state = 0x16b3_1c4d;
     let mut row = [0.0f32; POSITIONS];
@@ -300,7 +304,7 @@ fn shared_ruler_keeps_normal_probit_without_flapping() {
         link_refit_interval: 4,
         ..QuantileSpineConfig::default()
     };
-    let mut spine = QuantileSpine::with_config(&[POSITIONS], config);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], config);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let mut state = 0xd131_0ba6;
     let mut row = [0.0f32; POSITIONS];
@@ -333,8 +337,8 @@ fn shared_ruler_selects_log_probit_without_accuracy_loss() {
         link_refit_interval: 0,
         ..adaptive_config
     };
-    let mut adaptive = QuantileSpine::with_config(&[POSITIONS], adaptive_config);
-    let mut fixed = QuantileSpine::with_config(&[POSITIONS], fixed_config);
+    let mut adaptive = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], adaptive_config);
+    let mut fixed = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], fixed_config);
     let lognormal = LogNormal::new(0.2, 0.9).unwrap();
     let mut state = 0xa409_3822;
     let mut row = [0.0f32; POSITIONS];
@@ -372,7 +376,7 @@ fn shared_ruler_switches_after_a_normal_to_uniform_change() {
         link_refit_interval: 4,
         ..QuantileSpineConfig::default()
     };
-    let mut spine = QuantileSpine::with_config(&[POSITIONS], config);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[POSITIONS], config);
     let normal = Normal::new(0.0, 1.0).unwrap();
     let uniform = Uniform::new(8.0, 12.0).unwrap();
     let mut state = 0x299f_31d0;
@@ -406,7 +410,7 @@ fn shared_ruler_switches_after_a_normal_to_uniform_change() {
 
 #[test]
 fn multidimensional_and_i32_api() {
-    let mut spine = QuantileSpine::<i32>::new(&[2, 2]);
+    let mut spine = TensorDigest::<i32, QuantileSpine>::new(&[2, 2]);
     assert_eq!(spine.shape(), &[2, 2]);
     assert_eq!(spine.numel(), 4);
     for i in 0..100 {
@@ -421,6 +425,6 @@ fn multidimensional_and_i32_api() {
 #[test]
 #[should_panic]
 fn wrong_length_panics() {
-    let mut spine = QuantileSpine::<f32>::new(&[2]);
+    let mut spine = TensorDigest::<f32, QuantileSpine>::new(&[2]);
     spine.update(&[1.0]);
 }

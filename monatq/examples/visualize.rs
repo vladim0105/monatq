@@ -39,7 +39,12 @@ fn main() -> std::io::Result<()> {
     let args = Args::parse();
     let shape = &args.shape.0;
     let numel: usize = shape.iter().product();
-    let mut td = TensorDigest::new(shape, args.compression);
+    let mut td = TensorDigest::<_, monatq::TDigest>::with_config(
+        shape,
+        monatq::TDigestConfig {
+            compression: args.compression,
+        },
+    );
 
     // Assign a random kind to every element position.
     // Kinds 0..3 are Normal/Uniform/Laplace/LogNormal; kind 4 is bimodal (Unknown).

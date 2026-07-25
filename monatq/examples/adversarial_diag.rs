@@ -1,3 +1,4 @@
+use monatq::TensorDigest;
 use monatq::{QuantileSpine, QuantileSpineConfig};
 
 const GRID_STEPS: usize = 1_000;
@@ -23,7 +24,7 @@ fn rank_interval_error(sorted: &[f32], estimate: f32, q: f32) -> f64 {
 
 fn eval(values: &[f32], config: QuantileSpineConfig) -> (f64, f64) {
     let quantiles = quantile_grid();
-    let mut spine = QuantileSpine::with_config(&[1], config);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[1], config);
     for &value in values {
         spine.update(&[value]);
     }
@@ -148,7 +149,7 @@ fn main() {
     // Genuine change-point latency with the default (adaptive) config:
     // uniform on [0,1], then an abrupt shift to [5,6]. How many post-shift
     // batches until the median estimate is within 0.05 of the new median?
-    let mut spine = QuantileSpine::with_config(&[1], default);
+    let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[1], default);
     let mut state = 0x9e37_79b9u32;
     let mut rand = || {
         state ^= state << 13;
@@ -167,7 +168,7 @@ fn main() {
             spine.update(&[v]);
         }
         spine.flush();
-        let median = spine.recent_cell_quantiles(0, &[0.5])[0];
+        let median = spine.cell_quantiles(0, &[0.5])[0];
         if batches_needed.is_none() && (median - 5.5).abs() < 0.05 {
             batches_needed = Some(batch);
         }

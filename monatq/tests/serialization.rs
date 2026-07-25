@@ -2,16 +2,16 @@ use std::io::ErrorKind;
 
 use monatq::{AnyTensorDigest, TensorDigest};
 
-fn make_f32_digest() -> TensorDigest<f32> {
-    let mut digest = TensorDigest::<f32>::new(&[1], 100);
+fn make_f32_digest() -> TensorDigest<f32, monatq::TDigest> {
+    let mut digest = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for i in 0..500u32 {
         digest.update(&[i as f32 * 0.002]);
     }
     digest
 }
 
-fn make_i32_digest() -> TensorDigest<i32> {
-    let mut digest = TensorDigest::<i32>::new(&[2], 100);
+fn make_i32_digest() -> TensorDigest<i32, monatq::TDigest> {
+    let mut digest = TensorDigest::<i32, monatq::TDigest>::new(&[2]);
     for i in 0..50 {
         digest.update(&[i, -i]);
     }
@@ -29,7 +29,7 @@ fn file_roundtrip() {
     let path = temp_path("file_roundtrip");
 
     original.save(&path).expect("save failed");
-    let mut loaded = TensorDigest::<f32>::load(&path).expect("load failed");
+    let mut loaded = TensorDigest::<f32, monatq::TDigest>::load(&path).expect("load failed");
     std::fs::remove_file(&path).ok();
 
     assert_eq!(loaded.shape(), original.shape());
@@ -43,7 +43,8 @@ fn typed_f32_bytes_roundtrip() {
     let expected = original.quantiles(&[0.1, 0.5, 0.9]);
 
     let bytes = original.to_bytes().expect("serialization failed");
-    let mut loaded = TensorDigest::<f32>::from_bytes(&bytes).expect("deserialization failed");
+    let mut loaded =
+        TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
     assert_eq!(loaded.numel(), original.numel());
@@ -56,7 +57,8 @@ fn typed_i32_bytes_roundtrip() {
     let expected = original.quantiles(&[0.25, 0.5, 0.75]);
 
     let bytes = original.to_bytes().expect("serialization failed");
-    let mut loaded = TensorDigest::<i32>::from_bytes(&bytes).expect("deserialization failed");
+    let mut loaded =
+        TensorDigest::<i32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
     assert_eq!(loaded.numel(), original.numel());
@@ -93,7 +95,7 @@ fn file_and_bytes_formats_are_cross_compatible() {
     original.save(&path).expect("save failed");
     let file_bytes = std::fs::read(&path).expect("read failed");
     let mut loaded_from_file_bytes =
-        TensorDigest::<f32>::from_bytes(&file_bytes).expect("from_bytes failed");
+        TensorDigest::<f32, monatq::TDigest>::from_bytes(&file_bytes).expect("from_bytes failed");
     assert_eq!(loaded_from_file_bytes.quantile(0.5), expected);
 
     let memory_bytes = original.to_bytes().expect("to_bytes failed");
@@ -108,7 +110,7 @@ fn file_and_bytes_formats_are_cross_compatible() {
 
 #[test]
 fn to_bytes_flushes_pending_data() {
-    let mut digest = TensorDigest::<f32>::new(&[1], 100);
+    let mut digest = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for value in 0..10 {
         digest.update(&[value as f32]);
     }
@@ -117,7 +119,8 @@ fn to_bytes_flushes_pending_data() {
     let bytes = digest.to_bytes().expect("serialization failed");
     assert_eq!(digest.total_weight(0), 10);
 
-    let mut loaded = TensorDigest::<f32>::from_bytes(&bytes).expect("deserialization failed");
+    let mut loaded =
+        TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
     assert_eq!(loaded.total_weight(0), 10);
     assert_eq!(loaded.quantile(0.5), digest.quantile(0.5));
 }
@@ -126,7 +129,7 @@ fn to_bytes_flushes_pending_data() {
 fn typed_from_bytes_rejects_dtype_mismatch() {
     let mut digest = make_f32_digest();
     let bytes = digest.to_bytes().expect("serialization failed");
-    let error = TensorDigest::<i32>::from_bytes(&bytes)
+    let error = TensorDigest::<i32, monatq::TDigest>::from_bytes(&bytes)
         .err()
         .expect("expected a dtype mismatch");
 
@@ -159,7 +162,7 @@ fn invalid_byte_inputs_are_rejected() {
     let mut valid_digest = make_f32_digest();
     let mut truncated = valid_digest.to_bytes().expect("serialization failed");
     truncated.truncate(truncated.len() / 2);
-    let truncated_error = TensorDigest::<f32>::from_bytes(&truncated)
+    let truncated_error = TensorDigest::<f32, monatq::TDigest>::from_bytes(&truncated)
         .err()
         .expect("truncated snapshot unexpectedly loaded");
     assert_eq!(truncated_error.kind(), ErrorKind::InvalidData);

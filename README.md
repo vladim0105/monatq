@@ -1,8 +1,8 @@
 # monatq
 
-**Monakhov Tensor Quantiles** - approximate quantile tracking for tensors using T-Digest.
+**Monakhov Tensor Quantiles** - approximate quantile tracking for tensors.
 
-`monatq` maintains one T-Digest per element position across many tensor samples, enabling fast approximate quantile queries (median, percentiles, etc.) over the observed value distribution at each position. Updates are parallelised element-wise via Rayon.
+`monatq` provides a unified `TensorDigest<T, K>` container with statically selected `TDigest` and `QuantileSpine` kernels. Each kernel retains its optimized flat storage layout, and updates are parallelised element-wise via Rayon.
 
 ## Use Cases
 
@@ -24,10 +24,10 @@ cargo add monatq
 ### Usage
 
 ```rust
-use monatq::TensorDigest;
+use monatq::{TDigest, TensorDigest};
 
-// Track a [3, 4] tensor (12 elements)
-let mut digest = TensorDigest::new(&[3, 4], 100);
+// Track a [3, 4] tensor (12 elements) with the T-Digest kernel and default config.
+let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
 
 // Feed samples (row-major flat slices)
 for sample in my_tensor_samples {
@@ -44,17 +44,25 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 let distributions = digest.analyze();
 ```
 
+Select Quantile Spine without runtime dispatch:
+
+```rust
+use monatq::{QuantileSpine, TensorDigest};
+
+let mut digest = TensorDigest::<f32, QuantileSpine>::new(&[3, 4]);
+```
+
 ### Snapshots
 
 ```rust
-use monatq::TensorDigest;
+use monatq::{TDigest, TensorDigest};
 
-let mut digest = TensorDigest::<f32>::new(&[3, 4], 100);
+let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
 // ... update the digest ...
 
 // Serialize to memory and restore with a known element type.
 let bytes = digest.to_bytes().unwrap();
-let restored = TensorDigest::<f32>::from_bytes(&bytes).unwrap();
+let restored = TensorDigest::<f32, TDigest>::from_bytes(&bytes).unwrap();
 
 // Or detect f32/i32 from the embedded dtype tag.
 let restored_any = monatq::from_bytes(&bytes).unwrap();

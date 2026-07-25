@@ -1,8 +1,8 @@
 use monatq::TensorDigest;
 use statrs::distribution::{ContinuousCDF, Normal, Uniform};
 
-fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32> {
-    let mut td = TensorDigest::<f32>::new(&[1], 100);
+fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32, monatq::TDigest> {
+    let mut td = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for v in values {
         td.update(&[v]);
     }
@@ -166,7 +166,7 @@ fn cell_quantiles_consistent() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[3], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[3]);
     for &v in &vals {
         td.update(&[v, v * 0.5, -v]);
     }
@@ -189,8 +189,8 @@ fn merge_cells_combines_selected_distributions() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[3], 100);
-    let mut expected = TensorDigest::new(&[1], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[3]);
+    let mut expected = TensorDigest::<_, monatq::TDigest>::new(&[1]);
     for &v in &vals {
         td.update(&[v, v * 0.5, -v]);
         expected.update(&[v]);
@@ -211,7 +211,7 @@ fn merge_cells_combines_selected_distributions() {
 
 #[test]
 fn merge_cells_empty_selection_returns_empty_digest() {
-    let mut td = TensorDigest::new(&[2], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2]);
     td.update(&[1.0, 2.0]);
 
     let mut merged = td.merge_cells(&[]);
@@ -224,8 +224,8 @@ fn merge_cells_empty_selection_returns_empty_digest() {
 fn merge_cells_all_tensor_elements_matches_expected_for_large_tensor() {
     let shape = [1, 5, 64, 64];
     let numel: usize = shape.iter().product();
-    let mut td = TensorDigest::new(&shape, 100);
-    let mut expected = TensorDigest::new(&[1], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&shape);
+    let mut expected = TensorDigest::<_, monatq::TDigest>::new(&[1]);
 
     for sample_idx in 0..256usize {
         let mut frame = vec![0.0f32; numel];
@@ -254,7 +254,7 @@ fn merge_cells_all_tensor_elements_matches_expected_for_large_tensor() {
 #[test]
 #[should_panic]
 fn update_wrong_length_panics() {
-    let mut td = TensorDigest::new(&[1], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[1]);
     td.update(&[1.0, 2.0]);
 }
 
@@ -272,7 +272,7 @@ fn multi_dim_shape() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[2, 3], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2, 3]);
     assert_eq!(td.numel(), 6);
     assert_eq!(td.shape(), &[2, 3]);
 
@@ -291,7 +291,7 @@ fn multi_dim_shape() {
 fn merge_all_cells_large() {
     let shape = [5usize, 5, 128, 128];
     let numel: usize = shape.iter().product();
-    let mut td = TensorDigest::new(&shape, 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&shape);
     for s in 0..2000usize {
         let frame: Vec<f32> = (0..numel).map(|i| (s * numel + i) as f32 * 0.001).collect();
         td.update(&frame);
@@ -302,8 +302,8 @@ fn merge_all_cells_large() {
 
 #[test]
 fn i32_quantile_accuracy() {
-    // Verify that TensorDigest<i32> correctly estimates quantiles for integer input.
-    let mut d = TensorDigest::<i32>::new(&[1], 100);
+    // Verify that TensorDigest<i32, monatq::TDigest> correctly estimates quantiles for integer input.
+    let mut d = TensorDigest::<i32, monatq::TDigest>::new(&[1]);
     for i in 1..=1000_i32 {
         d.update(&[i]);
     }

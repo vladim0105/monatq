@@ -54,7 +54,7 @@ fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, u
 /// buffer protocol (numpy) → torch fast path → Python list fallback.
 fn update_typed<T>(
     py: Python<'_>,
-    d: &mut monatq::TensorDigest<T>,
+    d: &mut monatq::TensorDigest<T, monatq::TDigest>,
     data: &Bound<'_, PyAny>,
     numel: usize,
     dtype_name: &'static str,
@@ -101,8 +101,8 @@ where
 }
 
 enum Inner {
-    F32(monatq::TensorDigest<f32>),
-    I32(monatq::TensorDigest<i32>),
+    F32(monatq::TensorDigest<f32, monatq::TDigest>),
+    I32(monatq::TensorDigest<i32, monatq::TDigest>),
 }
 
 impl From<monatq::AnyTensorDigest> for Inner {
@@ -219,8 +219,14 @@ impl PyTensorDigest {
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let inner = match dtype.map(normalize_dtype).transpose()?.unwrap_or("float32") {
-            "float32" => Inner::F32(monatq::TensorDigest::<f32>::new(&shape, compression)),
-            "int32" => Inner::I32(monatq::TensorDigest::<i32>::new(&shape, compression)),
+            "float32" => Inner::F32(monatq::TensorDigest::<f32, monatq::TDigest>::with_config(
+                &shape,
+                monatq::TDigestConfig { compression },
+            )),
+            "int32" => Inner::I32(monatq::TensorDigest::<i32, monatq::TDigest>::with_config(
+                &shape,
+                monatq::TDigestConfig { compression },
+            )),
             other => unreachable!("normalize_dtype returned unexpected value: {other}"),
         };
         Ok(Self { inner })
