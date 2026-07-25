@@ -1,11 +1,9 @@
-use std::io::ErrorKind;
-
 use monatq::{AnyTensorDigest, TensorDigest};
 
 fn make_f32_digest() -> TensorDigest<f32, monatq::TDigest> {
     let mut digest = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for i in 0..500u32 {
-        digest.update(&[i as f32 * 0.002]);
+        digest.update(&[i as f32 * 0.002]).unwrap();
     }
     digest
 }
@@ -13,7 +11,7 @@ fn make_f32_digest() -> TensorDigest<f32, monatq::TDigest> {
 fn make_i32_digest() -> TensorDigest<i32, monatq::TDigest> {
     let mut digest = TensorDigest::<i32, monatq::TDigest>::new(&[2]);
     for i in 0..50 {
-        digest.update(&[i, -i]);
+        digest.update(&[i, -i]).unwrap();
     }
     digest
 }
@@ -112,16 +110,16 @@ fn file_and_bytes_formats_are_cross_compatible() {
 fn to_bytes_flushes_pending_data() {
     let mut digest = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for value in 0..10 {
-        digest.update(&[value as f32]);
+        digest.update(&[value as f32]).unwrap();
     }
-    assert_eq!(digest.total_weight(0), 0);
+    assert_eq!(digest.total_weight(0).unwrap(), 0);
 
     let bytes = digest.to_bytes().expect("serialization failed");
-    assert_eq!(digest.total_weight(0), 10);
+    assert_eq!(digest.total_weight(0).unwrap(), 10);
 
     let mut loaded =
         TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
-    assert_eq!(loaded.total_weight(0), 10);
+    assert_eq!(loaded.total_weight(0).unwrap(), 10);
     assert_eq!(loaded.quantile(0.5), digest.quantile(0.5));
 }
 
@@ -130,10 +128,9 @@ fn typed_from_bytes_rejects_dtype_mismatch() {
     let mut digest = make_f32_digest();
     let bytes = digest.to_bytes().expect("serialization failed");
     let error = TensorDigest::<i32, monatq::TDigest>::from_bytes(&bytes)
-        .err()
-        .expect("expected a dtype mismatch");
+        .expect_err("expected a dtype mismatch");
 
-    assert_eq!(error.kind(), ErrorKind::InvalidData);
+    assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
     assert!(error.to_string().contains("dtype mismatch"));
 }
 
@@ -143,27 +140,35 @@ fn invalid_byte_inputs_are_rejected() {
         let error = monatq::from_bytes(bytes)
             .err()
             .expect("invalid input unexpectedly loaded");
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
     }
 
     let empty_payload = zstd::encode_all(&[][..], 3).expect("compression failed");
     let empty_error = monatq::from_bytes(&empty_payload)
         .err()
         .expect("empty payload unexpectedly loaded");
-    assert_eq!(empty_error.kind(), ErrorKind::InvalidData);
+    assert!(
+        empty_error.is_invalid_snapshot(),
+        "unexpected error: {empty_error}"
+    );
 
     let unknown_payload = zstd::encode_all(&[99][..], 3).expect("compression failed");
     let unknown_error = monatq::from_bytes(&unknown_payload)
         .err()
         .expect("unknown dtype unexpectedly loaded");
-    assert_eq!(unknown_error.kind(), ErrorKind::InvalidData);
+    assert!(
+        unknown_error.is_invalid_snapshot(),
+        "unexpected error: {unknown_error}"
+    );
     assert!(unknown_error.to_string().contains("unknown dtype tag 99"));
 
     let mut valid_digest = make_f32_digest();
     let mut truncated = valid_digest.to_bytes().expect("serialization failed");
     truncated.truncate(truncated.len() / 2);
     let truncated_error = TensorDigest::<f32, monatq::TDigest>::from_bytes(&truncated)
-        .err()
-        .expect("truncated snapshot unexpectedly loaded");
-    assert_eq!(truncated_error.kind(), ErrorKind::InvalidData);
+        .expect_err("truncated snapshot unexpectedly loaded");
+    assert!(
+        truncated_error.is_invalid_snapshot(),
+        "unexpected error: {truncated_error}"
+    );
 }

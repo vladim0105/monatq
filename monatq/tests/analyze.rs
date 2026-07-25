@@ -4,7 +4,7 @@ use statrs::distribution::{ContinuousCDF, LogNormal, Normal, Uniform};
 fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32, monatq::TDigest> {
     let mut td = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for v in values {
-        td.update(&[v]);
+        td.update(&[v]).unwrap();
     }
     td
 }
@@ -19,7 +19,7 @@ fn samples<D: ContinuousCDF<f64, f64>>(dist: &D, n: usize) -> Vec<f32> {
 fn analyze_normal() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let mut d = make_digest(samples(&dist, 2000));
-    let result = d.analyze()[0];
+    let result = d.analyze().unwrap()[0];
     assert_eq!(result, Distribution::Normal);
     assert_ne!(result, Distribution::Uniform);
 }
@@ -28,7 +28,7 @@ fn analyze_normal() {
 fn analyze_uniform() {
     let dist = Uniform::new(0.0, 1.0).unwrap();
     let mut d = make_digest(samples(&dist, 2000));
-    let result = d.analyze()[0];
+    let result = d.analyze().unwrap()[0];
     assert_eq!(result, Distribution::Uniform);
     assert_ne!(result, Distribution::Normal);
 }
@@ -44,7 +44,7 @@ fn analyze_laplace() {
         })
         .collect();
     let mut d = make_digest(laplace_vals);
-    let result = d.analyze()[0];
+    let result = d.analyze().unwrap()[0];
     assert_eq!(result, Distribution::Laplace);
     assert_ne!(result, Distribution::Normal);
 }
@@ -53,7 +53,7 @@ fn analyze_laplace() {
 fn analyze_lognormal() {
     let dist = LogNormal::new(0.0, 1.0).unwrap();
     let mut d = make_digest(samples(&dist, 2000));
-    let result = d.analyze()[0];
+    let result = d.analyze().unwrap()[0];
     assert_eq!(result, Distribution::LogNormal);
     assert_ne!(result, Distribution::Normal);
 }
@@ -61,7 +61,7 @@ fn analyze_lognormal() {
 #[test]
 fn analyze_degenerate() {
     let mut d = make_digest(std::iter::repeat_n(5.0f32, 200));
-    assert_eq!(d.analyze()[0], Distribution::Unknown);
+    assert_eq!(d.analyze().unwrap()[0], Distribution::Unknown);
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn analyze_binormal() {
         .collect();
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mut d = make_digest(vals);
-    assert_eq!(d.analyze()[0], Distribution::BiNormal);
+    assert_eq!(d.analyze().unwrap()[0], Distribution::BiNormal);
 }
 
 #[test]
@@ -88,10 +88,10 @@ fn analyze_tensor() {
 
     let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2]);
     for (n, u) in normal_vals.iter().zip(uniform_vals.iter()) {
-        td.update(&[*n, *u]);
+        td.update(&[*n, *u]).unwrap();
     }
 
-    let result = td.analyze();
+    let result = td.analyze().unwrap();
     assert_eq!(result, vec![Distribution::Normal, Distribution::Uniform]);
 }
 
@@ -120,10 +120,11 @@ fn analyze_no_misclassification() {
             uniform_vals[i],
             laplace_vals[i],
             lognormal_vals[i],
-        ]);
+        ])
+        .unwrap();
     }
 
-    let result = td.analyze();
+    let result = td.analyze().unwrap();
     assert_eq!(
         result[0],
         Distribution::Normal,
@@ -159,6 +160,6 @@ fn analyze_small_n() {
     let mut normal_d = make_digest(samples(&normal_dist, 500));
     let mut uniform_d = make_digest(samples(&uniform_dist, 500));
 
-    assert_eq!(normal_d.analyze()[0], Distribution::Normal);
-    assert_eq!(uniform_d.analyze()[0], Distribution::Uniform);
+    assert_eq!(normal_d.analyze().unwrap()[0], Distribution::Normal);
+    assert_eq!(uniform_d.analyze().unwrap()[0], Distribution::Uniform);
 }

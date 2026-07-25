@@ -35,7 +35,7 @@ impl std::str::FromStr for Shape {
     }
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> monatq::Result<()> {
     let args = Args::parse();
     let shape = &args.shape.0;
     let numel: usize = shape.iter().product();
@@ -75,7 +75,7 @@ fn main() -> std::io::Result<()> {
                 }
             };
         }
-        td.update(&frame);
+        td.update(&frame).unwrap();
     }
 
     eprintln!("fed {n_samples} samples  shape {shape:?}");

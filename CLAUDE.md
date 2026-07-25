@@ -22,6 +22,26 @@ Performance is a primary concern:
 - Element-wise updates are parallelised across tensor positions (e.g. via Rayon).
 - The TDigest implementation is custom (not an off-the-shelf crate) to meet performance requirements. Avoid replacing it with a third-party TDigest library.
 
+## Error handling
+
+Fallible public calls return `monatq::Result<T>`; see `src/error.rs`. Two rules keep this
+consistent:
+
+- Operations with no failure mode stay infallible (`quantile`, `quantiles`, `flush`,
+  `numel`, `shape`). Do not wrap them in `Result` for uniformity's sake.
+- A kernel that does not implement an operation returns `Error::Unsupported` rather than
+  `unimplemented!()`. Tooling that iterates over backends relies on this to skip a kernel
+  instead of crashing the run.
+
+NaN input is a documented precondition of `update`, not a checked one; it is not validated
+on the hot path and panics during a later flush.
+
 ## Project Structure
 
-This is a Rust library crate using the 2024 edition. The entry point is `src/lib.rs`. There are currently no external dependencies.
+This is a Rust workspace using the 2024 edition: the `monatq` library (entry point
+`monatq/src/lib.rs`) and `monatq-py` PyO3 bindings. Kernels live in `monatq/src/kernels/`
+and are selected statically through the sealed `DigestKernel` trait; not every kernel
+implements every operation.
+
+Note that `cargo build -p monatq-py` fails at link time outside maturin (undefined
+`_PyExc_*`); use `cargo check -p monatq-py` to validate the bindings.

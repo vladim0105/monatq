@@ -3,12 +3,54 @@ use std::sync::OnceLock;
 use rayon::prelude::*;
 
 use crate::{
+    Result,
+    error::{check_index, check_sample_len, unsupported},
     kernels::{DigestKernel, RankKnot, RankKnotConfig, sealed},
     tensor_digest::StorageOperations,
 };
 
 pub const RANK_KNOT_K: usize = 32;
 const MASS_QUANTA: u64 = u16::MAX as u64;
+
+/// Leading byte of a RankKnot snapshot payload.
+///
+/// The crate-level [`crate::from_bytes`] loader reads the first payload byte as a t-digest
+/// dtype tag, so this must not collide with any `TensorValue::DTYPE_TAG`. A distinct value
+/// turns "RankKnot snapshot passed to the t-digest loader" into a clean error instead of a
+/// misparse.
+const RANK_KNOT_KERNEL_TAG: u8 = 0x52;
+
+/// Snapshot format revision. Bump whenever the field layout below changes.
+const RANK_KNOT_FORMAT_VERSION: u16 = 1;
+
+/// On-disk form of [`RankKnotStorage`].
+///
+/// The encoding constants travel with the data. `RANK_KNOT_K`, `MASS_QUANTA`, and the
+/// arcsine targets are documented as unstable internals, so a snapshot written by a future
+/// build with different constants must be rejected rather than decoded into a state whose
+/// masses no longer mean what the reader assumes.
+///
+/// Knots are stored as flat parallel vectors rather than as `[_; RANK_KNOT_K]` arrays so the
+/// format does not inherit serde's 32-element array limit if `RANK_KNOT_K` ever grows.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RankKnotSnapshot {
+    kernel_tag: u8,
+    format_version: u16,
+    knot_count: u32,
+    mass_quanta: u64,
+    dtype_tag: u8,
+    shape: Vec<usize>,
+    sample_count: u64,
+    values: Vec<f32>,
+    masses: Vec<u16>,
+    pure_masks: Vec<u64>,
+    mins: Vec<f32>,
+    maxs: Vec<f32>,
+}
+
+fn invalid_data(message: impl Into<String>) -> crate::Error {
+    crate::Error::InvalidSnapshot(message.into())
+}
 
 /// The complete persistent summary for one tensor position.
 #[repr(C)]
@@ -105,14 +147,269 @@ impl RankKnotStorage {
         self.states.iter().map(|state| state.max).collect()
     }
 
+    /// Callers reach this through `TensorDigest`, which validates `idx` first.
     pub(crate) fn cell_min(&mut self, idx: usize) -> f32 {
         self.flush();
         self.states[idx].min
     }
 
+    /// Callers reach this through `TensorDigest`, which validates `idx` first.
     pub(crate) fn cell_max(&mut self, idx: usize) -> f32 {
         self.flush();
         self.states[idx].max
+    }
+
+    /// Number of flat positions per channel (product of the last two shape dims, or `numel`
+    /// for tensors with fewer than two dimensions).
+    fn spatial_size(&self) -> usize {
+        let ndim = self.shape.len();
+        if ndim < 2 {
+            self.numel
+        } else {
+            self.shape[ndim - 2] * self.shape[ndim - 1]
+        }
+    }
+
+    /// Merge the summaries of the selected flat positions into one single-position digest.
+    ///
+    /// Every position observes the same number of samples, so the stored 16-bit masses are
+    /// already on a common scale and can be unioned directly: collect the weighted support of
+    /// each selected position, sort once, coalesce equal values, and run the same compressor
+    /// used by ingestion. Extrema are exact unions of the source extrema.
+    pub(crate) fn merge_cells(&mut self, indices: &[usize]) -> Result<Self> {
+        self.flush();
+        let mut merged = RankKnotStorage::with_config(&[1], self.config);
+        if indices.is_empty() {
+            return Ok(merged);
+        }
+
+        let mut entries = Vec::with_capacity(indices.len() * RANK_KNOT_K);
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for &idx in indices {
+            check_index(idx, self.numel)?;
+            let state = &self.states[idx];
+            min = min_value(min, state.min);
+            max = max_value(max, state.max);
+            collect_support(state, &mut entries);
+        }
+
+        merged.sample_count = self.sample_count.saturating_mul(indices.len() as u64);
+        merged.states[0].min = min;
+        merged.states[0].max = max;
+        if entries.is_empty() {
+            return Ok(merged);
+        }
+
+        // Sort once, then coalesce equal values in place. `dedup_by` hands out the kept
+        // predecessor by mutable reference, so the union needs no second buffer.
+        entries.sort_unstable_by(|left, right| left.value.total_cmp(&right.value));
+        entries.dedup_by(|entry, kept| {
+            if kept.value == entry.value {
+                kept.weight = kept.weight.saturating_add(entry.weight);
+                kept.pure &= entry.pure;
+                true
+            } else {
+                false
+            }
+        });
+        let mut boundaries = [0_usize; RANK_KNOT_K - 1];
+        compress_and_store(&entries, &mut merged.states[0], &mut boundaries);
+        Ok(merged)
+    }
+
+    /// Merge every position of the selected leading-dimension channels into one digest.
+    ///
+    /// A "channel" is a contiguous block of `H×W` flat positions; for a 4-D tensor
+    /// `[B, C, H, W]` the channel flat index is `b * C + c`. Unlike the t-digest kernel this
+    /// performs a single compression pass over the union rather than compressing per channel
+    /// first: knot weights are `u64` and moments accumulate in `f64`, so there is no
+    /// precision reason to pay a second lossy repartition.
+    pub(crate) fn merge_channels(&mut self, channel_indices: &[usize]) -> Result<Self> {
+        let hw = self.spatial_size();
+        let mut cells = Vec::with_capacity(channel_indices.len() * hw);
+        for &channel in channel_indices {
+            let start = channel * hw;
+            check_index(start + hw - 1, self.numel)?;
+            cells.extend(start..start + hw);
+        }
+        self.merge_cells(&cells)
+    }
+
+    /// Merge every tensor position into one single-position digest.
+    pub(crate) fn merge_all(&mut self) -> Result<Self> {
+        self.merge_cells(&(0..self.numel).collect::<Vec<_>>())
+    }
+
+    /// Flush pending rows and return a zstd-compressed bincode snapshot.
+    ///
+    /// Only the compressed summary state is persisted. Buffered rows are folded in by the
+    /// flush, and `buffer_capacity` is deliberately *not* stored: it is an ingestion tuning
+    /// knob that does not affect the encoded distribution, so a loaded digest starts from
+    /// [`RankKnotConfig::default`] and callers who care must reapply their own value.
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_bytes(&mut self) -> Result<Vec<u8>> {
+        self.flush();
+        let mut values = Vec::with_capacity(self.numel * RANK_KNOT_K);
+        let mut masses = Vec::with_capacity(self.numel * RANK_KNOT_K);
+        let mut pure_masks = Vec::with_capacity(self.numel);
+        let mut mins = Vec::with_capacity(self.numel);
+        let mut maxs = Vec::with_capacity(self.numel);
+        for state in &self.states {
+            values.extend_from_slice(&state.values);
+            masses.extend_from_slice(&state.masses);
+            pure_masks.push(state.pure_mask);
+            mins.push(state.min);
+            maxs.push(state.max);
+        }
+
+        let snapshot = RankKnotSnapshot {
+            kernel_tag: RANK_KNOT_KERNEL_TAG,
+            format_version: RANK_KNOT_FORMAT_VERSION,
+            knot_count: RANK_KNOT_K as u32,
+            mass_quanta: MASS_QUANTA,
+            dtype_tag: <f32 as crate::TensorValue>::DTYPE_TAG,
+            shape: self.shape.clone(),
+            sample_count: self.sample_count,
+            values,
+            masses,
+            pure_masks,
+            mins,
+            maxs,
+        };
+        let payload =
+            bincode2::serialize(&snapshot).map_err(|error| invalid_data(error.to_string()))?;
+        zstd::encode_all(payload.as_slice(), 3).map_err(crate::Error::Io)
+    }
+
+    /// Load and decompress a snapshot from memory.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let payload = zstd::decode_all(bytes).map_err(|error| invalid_data(error.to_string()))?;
+        Self::from_payload(&payload)
+    }
+
+    /// Decode an uncompressed snapshot payload.
+    ///
+    /// Every field that the reader relies on is validated before it is used. A snapshot is
+    /// untrusted input: wrong encoding constants, inconsistent lengths, or masses that do not
+    /// normalize would otherwise yield a digest that answers queries with silent nonsense.
+    pub(crate) fn from_payload(payload: &[u8]) -> Result<Self> {
+        let snapshot: RankKnotSnapshot =
+            bincode2::deserialize(payload).map_err(|error| invalid_data(error.to_string()))?;
+
+        if snapshot.kernel_tag != RANK_KNOT_KERNEL_TAG {
+            return Err(invalid_data(format!(
+                "not a RankKnot snapshot: kernel tag {} but expected {RANK_KNOT_KERNEL_TAG}",
+                snapshot.kernel_tag
+            )));
+        }
+        if snapshot.format_version != RANK_KNOT_FORMAT_VERSION {
+            return Err(invalid_data(format!(
+                "unsupported RankKnot snapshot version {} but expected {RANK_KNOT_FORMAT_VERSION}",
+                snapshot.format_version
+            )));
+        }
+        if snapshot.knot_count as usize != RANK_KNOT_K || snapshot.mass_quanta != MASS_QUANTA {
+            return Err(invalid_data(format!(
+                "snapshot encoding mismatch: K={} quanta={} but this build uses K={RANK_KNOT_K} quanta={MASS_QUANTA}",
+                snapshot.knot_count, snapshot.mass_quanta
+            )));
+        }
+        let expected_tag = <f32 as crate::TensorValue>::DTYPE_TAG;
+        if snapshot.dtype_tag != expected_tag {
+            return Err(invalid_data(format!(
+                "dtype mismatch: snapshot contains tag {} but expected {expected_tag}",
+                snapshot.dtype_tag
+            )));
+        }
+
+        let numel = snapshot.shape.iter().product::<usize>();
+        let knots = numel
+            .checked_mul(RANK_KNOT_K)
+            .ok_or_else(|| invalid_data("snapshot shape overflows the knot count"))?;
+        if snapshot.values.len() != knots
+            || snapshot.masses.len() != knots
+            || snapshot.pure_masks.len() != numel
+            || snapshot.mins.len() != numel
+            || snapshot.maxs.len() != numel
+        {
+            return Err(invalid_data(
+                "snapshot arrays do not match the stored shape",
+            ));
+        }
+
+        let mut storage = Self::with_config(&snapshot.shape, RankKnotConfig::default());
+        storage.sample_count = snapshot.sample_count;
+        for (position, state) in storage.states.iter_mut().enumerate() {
+            let start = position * RANK_KNOT_K;
+            state
+                .values
+                .copy_from_slice(&snapshot.values[start..start + RANK_KNOT_K]);
+            state
+                .masses
+                .copy_from_slice(&snapshot.masses[start..start + RANK_KNOT_K]);
+            state.pure_mask = snapshot.pure_masks[position];
+            state.min = snapshot.mins[position];
+            state.max = snapshot.maxs[position];
+            validate_state(state, position)?;
+        }
+        Ok(storage)
+    }
+}
+
+/// Reject a decoded state that violates an invariant the query path assumes.
+///
+/// Queries stay memory-safe on any input, so these checks exist to prevent a corrupt or
+/// hand-edited snapshot from silently producing wrong quantiles.
+fn validate_state(state: &RankKnotState, position: usize) -> Result<()> {
+    let total = state
+        .masses
+        .iter()
+        .map(|&mass| u64::from(mass))
+        .sum::<u64>();
+    if total != 0 && total != MASS_QUANTA {
+        return Err(invalid_data(format!(
+            "position {position}: active masses sum to {total} but must sum to {MASS_QUANTA}"
+        )));
+    }
+
+    let mut previous: Option<f32> = None;
+    for index in 0..RANK_KNOT_K {
+        if state.masses[index] == 0 {
+            continue;
+        }
+        let value = state.values[index];
+        if value.is_nan() {
+            return Err(invalid_data(format!(
+                "position {position}: knot {index} is NaN, which RankKnot does not support"
+            )));
+        }
+        if previous.is_some_and(|previous| previous.total_cmp(&value).is_gt()) {
+            return Err(invalid_data(format!(
+                "position {position}: knot values are not in ascending order at index {index}"
+            )));
+        }
+        previous = Some(value);
+    }
+    Ok(())
+}
+
+/// Append the active weighted knots of `state` to `output`.
+///
+/// Masses are used unscaled: the sample count is shared by every position in a storage, so
+/// all sources carry identical total mass and no per-source rescaling is required. Keeping
+/// the values in `u16` range also keeps the merged total far away from `u64` saturation.
+fn collect_support(state: &RankKnotState, output: &mut Vec<Entry>) {
+    for index in 0..RANK_KNOT_K {
+        let mass = state.masses[index];
+        if mass == 0 {
+            continue;
+        }
+        output.push(Entry {
+            value: state.values[index],
+            weight: u64::from(mass),
+            pure: state.pure_mask & (1_u64 << index) != 0,
+        });
     }
 }
 
@@ -137,19 +434,20 @@ impl StorageOperations<f32> for RankKnotStorage {
         &self.shape
     }
 
-    fn total_weight(&self, idx: usize) -> u32 {
-        assert!(idx < self.numel, "position index out of bounds");
-        self.sample_count.min(u32::MAX as u64) as u32
+    fn total_weight(&self, idx: usize) -> Result<u32> {
+        check_index(idx, self.numel)?;
+        Ok(self.sample_count.min(u32::MAX as u64) as u32)
     }
 
-    fn update(&mut self, data: &[f32]) {
-        assert_eq!(data.len(), self.numel, "tensor sample has the wrong length");
+    fn update(&mut self, data: &[f32]) -> Result<()> {
+        check_sample_len(data.len(), self.numel)?;
         let start = self.n_buffered * self.numel;
         self.row_buffer[start..start + self.numel].copy_from_slice(data);
         self.n_buffered += 1;
         if self.n_buffered == self.config.buffer_capacity {
             self.flush();
         }
+        Ok(())
     }
 
     fn flush(&mut self) {
@@ -220,61 +518,61 @@ impl StorageOperations<f32> for RankKnotStorage {
             .collect()
     }
 
-    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Result<Vec<f32>> {
+        check_index(idx, self.numel)?;
         self.flush();
-        assert!(idx < self.numel, "position index out of bounds");
-        qs.iter().map(|&q| query(&self.states[idx], q)).collect()
+        Ok(qs.iter().map(|&q| query(&self.states[idx], q)).collect())
     }
 
-    fn merge_cells(&mut self, _indices: &[usize]) -> Self {
-        unimplemented!("RankKnot cell merging is not implemented")
+    fn merge_cells(&mut self, indices: &[usize]) -> Result<Self> {
+        RankKnotStorage::merge_cells(self, indices)
     }
 
-    fn merge_channels(&mut self, _channel_indices: &[usize]) -> Self {
-        unimplemented!("RankKnot channel merging is not implemented")
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> Result<Self> {
+        RankKnotStorage::merge_channels(self, channel_indices)
     }
 
-    fn merge_all(&mut self) -> Self {
-        unimplemented!("RankKnot tensor merging is not implemented")
+    fn merge_all(&mut self) -> Result<Self> {
+        RankKnotStorage::merge_all(self)
     }
 
-    fn analyze(&mut self) -> Vec<crate::Distribution> {
-        unimplemented!("RankKnot distribution analysis is not implemented")
+    fn analyze(&mut self) -> Result<Vec<crate::Distribution>> {
+        unsupported("RankKnot", "analyze")
     }
 
-    fn without_zeros(&mut self) -> Self {
-        unimplemented!("RankKnot zero filtering is not implemented")
+    fn without_zeros(&mut self) -> Result<Self> {
+        unsupported("RankKnot", "without_zeros")
     }
 
-    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    fn to_bytes(&mut self) -> Result<Vec<u8>>
     where
         f32: serde::Serialize,
     {
-        unimplemented!("RankKnot serialization is not implemented")
+        RankKnotStorage::to_bytes(self)
     }
 
-    fn from_bytes(_bytes: &[u8]) -> std::io::Result<Self>
+    fn from_bytes(bytes: &[u8]) -> Result<Self>
     where
         f32: serde::de::DeserializeOwned,
     {
-        unimplemented!("RankKnot deserialization is not implemented")
+        RankKnotStorage::from_bytes(bytes)
     }
 
-    fn from_payload(_payload: &[u8]) -> std::io::Result<Self>
+    fn from_payload(payload: &[u8]) -> Result<Self>
     where
         f32: serde::de::DeserializeOwned,
     {
-        unimplemented!("RankKnot payload deserialization is not implemented")
+        RankKnotStorage::from_payload(payload)
     }
 
     #[cfg(feature = "visualize")]
-    fn visualize(&mut self) -> std::io::Result<()> {
-        unimplemented!("RankKnot visualization is not implemented")
+    fn visualize(&mut self) -> Result<()> {
+        unsupported("RankKnot", "visualize")
     }
 
     #[cfg(feature = "visualize")]
-    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
-        unimplemented!("RankKnot visualization is not implemented")
+    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> Result<()> {
+        unsupported("RankKnot", "visualize_until")
     }
 }
 
@@ -624,6 +922,118 @@ mod tests {
         assert_eq!(round_div_ties_even(15, 2), 8);
     }
 
+    /// Build a valid snapshot payload, let `tamper` corrupt it, and assert the loader
+    /// refuses it. Snapshots are untrusted input, so every guard needs direct coverage.
+    fn assert_rejected(tamper: impl FnOnce(&mut RankKnotSnapshot), expected_fragment: &str) {
+        let mut storage = RankKnotStorage::with_config(&[2], RankKnotConfig::default());
+        for index in 0..1_000 {
+            storage.update(&[index as f32, -(index as f32)]).unwrap();
+        }
+        let bytes = storage.to_bytes().expect("serialization failed");
+        let payload = zstd::decode_all(bytes.as_slice()).expect("decode failed");
+        let mut snapshot: RankKnotSnapshot =
+            bincode2::deserialize(&payload).expect("valid snapshot must parse");
+
+        tamper(&mut snapshot);
+
+        let tampered = bincode2::serialize(&snapshot).expect("reserialization failed");
+        let Err(error) = RankKnotStorage::from_payload(&tampered) else {
+            panic!("tampered snapshot must be rejected");
+        };
+        assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
+        assert!(
+            error.to_string().contains(expected_fragment),
+            "error {error:?} does not mention {expected_fragment:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_guards_reject_corrupt_state() {
+        assert_rejected(
+            |snapshot| snapshot.kernel_tag ^= 0xff,
+            "not a RankKnot snapshot",
+        );
+        assert_rejected(
+            |snapshot| snapshot.format_version += 1,
+            "unsupported RankKnot snapshot version",
+        );
+        assert_rejected(|snapshot| snapshot.knot_count = 64, "encoding mismatch");
+        assert_rejected(|snapshot| snapshot.mass_quanta = 1_023, "encoding mismatch");
+        assert_rejected(|snapshot| snapshot.dtype_tag = 1, "dtype mismatch");
+        assert_rejected(
+            |snapshot| snapshot.shape = vec![3],
+            "do not match the stored shape",
+        );
+        assert_rejected(
+            |snapshot| snapshot.mins.pop().map(|_| ()).unwrap(),
+            "do not match the stored shape",
+        );
+        // Masses that no longer normalize would answer every query with a wrong rank.
+        assert_rejected(
+            |snapshot| {
+                let index = snapshot.masses.iter().position(|&mass| mass > 1).unwrap();
+                snapshot.masses[index] -= 1;
+            },
+            "must sum to",
+        );
+        // Out-of-order or NaN knots would break the monotone decode.
+        assert_rejected(
+            |snapshot| {
+                let active = (0..RANK_KNOT_K)
+                    .filter(|&index| snapshot.masses[index] != 0)
+                    .collect::<Vec<_>>();
+                snapshot.values.swap(active[0], active[active.len() - 1]);
+            },
+            "not in ascending order",
+        );
+        assert_rejected(
+            |snapshot| {
+                let index = (0..RANK_KNOT_K)
+                    .find(|&index| snapshot.masses[index] != 0)
+                    .unwrap();
+                snapshot.values[index] = f32::NAN;
+            },
+            "NaN",
+        );
+    }
+
+    #[test]
+    fn merged_state_keeps_the_encoding_invariants() {
+        let mut storage = RankKnotStorage::with_config(&[4], RankKnotConfig::default());
+        for index in 0..5_000 {
+            let value = (index % 331) as f32;
+            storage
+                .update(&[value, -value, 3.0, f32::INFINITY])
+                .unwrap();
+        }
+        let merged = storage.merge_all().unwrap();
+        let state = &merged.states[0];
+        assert_eq!(merged.sample_count(), 20_000);
+        assert_eq!(
+            state
+                .masses
+                .iter()
+                .map(|&mass| u64::from(mass))
+                .sum::<u64>(),
+            MASS_QUANTA
+        );
+        let active = (0..RANK_KNOT_K)
+            .filter(|&index| state.masses[index] != 0)
+            .collect::<Vec<_>>();
+        assert!(active.windows(2).all(|pair| {
+            state.values[pair[0]]
+                .total_cmp(&state.values[pair[1]])
+                .is_le()
+        }));
+        for &index in &active {
+            if !state.values[index].is_finite() {
+                assert_ne!(state.pure_mask & (1_u64 << index), 0);
+            }
+        }
+        assert_eq!(state.min, -330.0);
+        assert_eq!(state.max, f32::INFINITY);
+    }
+
     #[test]
     fn encoded_state_invariants_hold() {
         let mut storage = RankKnotStorage::with_config(
@@ -639,7 +1049,7 @@ mod tests {
                 _ if index % 11 == 0 => 3.0,
                 _ => ((index * 7919 % 1009) as f32 - 500.0) / 7.0,
             };
-            storage.update(&[value]);
+            storage.update(&[value]).unwrap();
         }
         storage.flush();
         let state = &storage.states[0];

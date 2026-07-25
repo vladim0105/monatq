@@ -398,11 +398,14 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     fn shape(&self) -> &[usize] {
         self.shape()
     }
-    fn total_weight(&self, idx: usize) -> u32 {
-        self.total_weight(idx)
+    fn total_weight(&self, idx: usize) -> crate::Result<u32> {
+        crate::error::check_index(idx, self.numel())?;
+        Ok(self.total_weight(idx))
     }
-    fn update(&mut self, data: &[T]) {
-        self.update(data)
+    fn update(&mut self, data: &[T]) -> crate::Result<()> {
+        crate::error::check_sample_len(data.len(), self.numel())?;
+        self.update(data);
+        Ok(())
     }
     fn flush(&mut self) {
         self.flush()
@@ -413,49 +416,57 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
         self.quantiles(qs)
     }
-    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
-        self.cell_quantiles(idx, qs)
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> crate::Result<Vec<f32>> {
+        crate::error::check_index(idx, self.numel())?;
+        Ok(self.cell_quantiles(idx, qs))
     }
-    fn merge_cells(&mut self, indices: &[usize]) -> Self {
-        TDigestStorage::merge_cells(self, indices)
+    fn merge_cells(&mut self, indices: &[usize]) -> crate::Result<Self> {
+        for &idx in indices {
+            crate::error::check_index(idx, self.numel())?;
+        }
+        Ok(TDigestStorage::merge_cells(self, indices))
     }
-    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
-        TDigestStorage::merge_channels(self, channel_indices)
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> crate::Result<Self> {
+        let hw = self.spatial_size();
+        for &channel in channel_indices {
+            crate::error::check_index(channel * hw + hw - 1, self.numel())?;
+        }
+        Ok(TDigestStorage::merge_channels(self, channel_indices))
     }
-    fn merge_all(&mut self) -> Self {
-        TDigestStorage::merge_all(self)
+    fn merge_all(&mut self) -> crate::Result<Self> {
+        Ok(TDigestStorage::merge_all(self))
     }
-    fn analyze(&mut self) -> Vec<crate::Distribution> {
-        TDigestStorage::analyze(self)
+    fn analyze(&mut self) -> crate::Result<Vec<crate::Distribution>> {
+        Ok(TDigestStorage::analyze(self))
     }
-    fn without_zeros(&mut self) -> Self {
-        TDigestStorage::without_zeros(self)
+    fn without_zeros(&mut self) -> crate::Result<Self> {
+        Ok(TDigestStorage::without_zeros(self))
     }
-    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    fn to_bytes(&mut self) -> crate::Result<Vec<u8>>
     where
         T: serde::Serialize,
     {
-        TDigestStorage::to_bytes(self)
+        TDigestStorage::to_bytes(self).map_err(crate::Error::from_snapshot_io)
     }
-    fn from_bytes(bytes: &[u8]) -> std::io::Result<Self>
+    fn from_bytes(bytes: &[u8]) -> crate::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        TDigestStorage::from_bytes(bytes)
+        TDigestStorage::from_bytes(bytes).map_err(crate::Error::from_snapshot_io)
     }
-    fn from_payload(payload: &[u8]) -> std::io::Result<Self>
+    fn from_payload(payload: &[u8]) -> crate::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        TDigestStorage::from_payload(payload)
+        TDigestStorage::from_payload(payload).map_err(crate::Error::from_snapshot_io)
     }
     #[cfg(feature = "visualize")]
-    fn visualize(&mut self) -> std::io::Result<()> {
-        TDigestStorage::visualize(self)
+    fn visualize(&mut self) -> crate::Result<()> {
+        TDigestStorage::visualize(self).map_err(crate::Error::Io)
     }
     #[cfg(feature = "visualize")]
-    fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
-        TDigestStorage::visualize_until(self, stop)
+    fn visualize_until(&mut self, stop: &std::sync::atomic::AtomicBool) -> crate::Result<()> {
+        TDigestStorage::visualize_until(self, stop).map_err(crate::Error::Io)
     }
 }
 

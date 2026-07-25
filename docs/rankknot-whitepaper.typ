@@ -351,7 +351,7 @@
 #v(0.25in)
 #hero
 #v(0.18in)
-#callout([The current implementation], [`TensorDigest<f32, RankKnot>` is an optional statically selected kernel. Thirty-two value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 208 bytes of state per position. The live collector also uses a 256-row input buffer by default and worker-local flush scratch. The generic API includes merge, analysis, zero-filtering, serialization, and optional visualization methods, but RankKnot’s implementations are explicit stubs that panic; direct support access and quantization remain future work.], tone: orange)
+#callout([The current implementation], [`TensorDigest<f32, RankKnot>` is an optional statically selected kernel. Thirty-two value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 208 bytes of state per position. The live collector also uses a 256-row input buffer by default and worker-local flush scratch. The generic API includes merge, analysis, zero-filtering, serialization, and optional visualization methods; the three `merge_*` operations and the three serialization operations are now implemented, while analysis, zero filtering, and visualization report `Error::Unsupported`. Direct support access and quantization remain future work.], tone: orange)
 
 #v(0.12in)
 #callout([An important wording distinction], [RankKnot incorporates every supported observation that reaches a successful flush, but it does not retain raw values afterward. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples, their temporal order, and cross-position relationships cannot be reconstructed. NaN input is unsupported and currently fails during flush rather than being rejected atomically by `update`.], tone: red)
@@ -363,7 +363,7 @@
 
 `TensorDigest` receives full tensor samples and tracks one distribution at every flat tensor position. `TensorDigest<f32, RankKnot>` is now an implemented, statically selected backend optimized for update throughput and compact state. It buffers complete samples, compresses each position independently in parallel, and exposes per-position quantiles and exact extrema.
 
-RankKnot separates *observation* from *decision*, but today it covers only recording and rank queries. Generic `TensorDigest` methods provide construction, shape, weight, update, flush, quantile, merge, analysis, zero filtering, serialization, and optional visualization operations; RankKnot adds sample count, configuration, and tensor/cell extrema. Its unsupported generic operations currently panic as unimplemented. Direct knot access, working grouping, persistence, visualization, analysis, and PTQ search remain design directions.
+RankKnot separates *observation* from *decision*; today it covers recording, rank queries, cold regrouping, and persistence. Generic `TensorDigest` methods provide construction, shape, weight, update, flush, quantile, merge, analysis, zero filtering, serialization, and optional visualization operations; RankKnot adds sample count, configuration, and tensor/cell extrema. Its remaining unimplemented generic operations return a typed `Error::Unsupported` rather than panicking, so a caller can discover the gap without crashing. Direct knot access, visualization, analysis, and PTQ search remain design directions.
 
 #figure(ptq-flow, caption: [The current recorder. Every supported tensor observation updates the same compact state. Quantiles and extrema are available now; richer cold consumers require future APIs.])
 
@@ -382,7 +382,8 @@ The K32 state uses 208 bytes per tensor position: 32 `f32` values, 32 `u16` mass
   [State primitive], [weighted centroids], [rank anchors], [up to 32 weighted knots],
   [Repeated values], [interpolated], [anchor dependent], [retained pure interval],
   [Exact min/max], [yes], [yes], [yes],
-  [Public `merge_*` contract], [implemented], [stub: panics], [stub: panics],
+  [Public `merge_*` contract], [implemented], [`Unsupported`], [implemented],
+  [Snapshot serialization], [implemented], [`Unsupported`], [implemented],
 )
 
 The table assumes default configurations, `f32`, and a 64-bit target. Allocator instrumentation over 32 positions measured RankKnot at 39,432 live bytes and 45,064 peak bytes, versus 182,408 live bytes for t-digest and 77,320 for Quantile Spine. The component totals explain the scaling; exact allocator totals also include shape vectors, headers, and worker scratch.
@@ -395,11 +396,11 @@ The table assumes default configurations, `f32`, and a 64-bit target. Allocator 
 
 A minimum and maximum preserve endpoints but reveal nothing about how probability is distributed between them. A fixed histogram commits to bin edges before the eventual query is known. A single percentile commits to one tail policy. A preselected channel grouping prevents later comparison with per-tensor or hardware-aligned alternatives.
 
-RankKnot instead records a reusable approximation of rank mass. The current API supports medians, arbitrary quantiles, percentile bands assembled by the caller, and exact per-position extrema. The encoded representation could also support grouping, distribution plots, saturation diagnostics, alert thresholds, and PTQ clipping if dedicated consumers or public state access are added.
+RankKnot instead records a reusable approximation of rank mass. The current API supports medians, arbitrary quantiles, percentile bands assembled by the caller, exact per-position extrema, and deferred regrouping. The encoded representation could also support distribution plots, saturation diagnostics, alert thresholds, and PTQ clipping if dedicated consumers or public state access are added.
 
-#callout([API status], [One generic `TensorDigest` contract now includes merge, analysis, zero filtering, serialization, and optional visualization. T-digest implements those operations; RankKnot and Quantile Spine expose them through explicit `unimplemented!` stubs that panic. RankKnot state remains crate-private, and callers cannot enumerate knots or hand weighted support directly to a quantizer.], tone: purple)
+#callout([API status], [One generic `TensorDigest` contract now includes merge, analysis, zero filtering, serialization, and optional visualization. T-digest implements those operations; RankKnot implements the three `merge_*` operations and snapshot serialization, and Quantile Spine implements none of them. Every fallible call returns `monatq::Result`, and an unimplemented kernel operation is reported as `Error::Unsupported` rather than as a panic; operations that cannot fail keep infallible signatures. RankKnot state remains crate-private, and callers cannot enumerate knots or hand weighted support directly to a quantizer.], tone: purple)
 
-The architecture is closer to a compact tensor history than to a quantizer, but today only its per-position rank-query surface is implemented.
+The architecture is closer to a compact tensor history than to a quantizer; today its per-position rank-query, regrouping, and persistence surfaces are implemented.
 
 == What cannot be deferred
 
@@ -422,7 +423,9 @@ Every input affects the state, but most inputs cease to be individually identifi
 
 == The 208-byte K32 summary-state layout
 
-All positions receive one observation at the same logical tensor update, so one `u64` sample count lives in RankKnot storage rather than in every position. The per-position state spends its final eight bytes on exact extrema. Input buffering and flush workspace are separate from this layout. NaN input is unsupported: `update` currently buffers it without validation, and a later flush panics in the sort comparator. This is not an atomic whole-update rejection contract.
+All positions receive one observation at the same logical tensor update, so one `u64` sample count lives in RankKnot storage rather than in every position. The per-position state spends its final eight bytes on exact extrema. Input buffering and flush workspace are separate from this layout.
+
+`update` validates one thing and one thing only: that a sample has exactly as many elements as the tensor. A wrong length is rejected with `Error::ShapeMismatch` before anything is buffered, so the digest is unchanged. NaN is *not* validated. It is a documented precondition, deliberately unchecked to keep the ingestion loop free of a per-element scan, and a NaN reaches the buffer and panics in the flush sort comparator. Ingestion is therefore atomic with respect to sample length but not with respect to NaN.
 
 #intuition(
   [Summary-state accounting],
@@ -526,9 +529,11 @@ A caller can defer its tail policy until after collection. One consumer may want
   [The shaded total tail mass is selected later. Collection does not hardcode `tau`, symmetry, or the eventual use of the range.],
 )
 
-== Future consumer: regrouping
+== Regrouping
 
-The generic contract now exposes `merge_cells`, `merge_channels`, and `merge_all`, but RankKnot’s implementations are deliberate `unimplemented!` stubs and panic when called. Its encoded state is crate-private, so callers cannot provide the missing union externally. A working implementation could treat each stored object as a positive weighted measure: scale masses by observation counts and optional group weights, union support, sort once, and run a compatible compressor.
+The generic contract exposes `merge_cells`, `merge_channels`, and `merge_all`, and RankKnot implements all three. Each stored position is treated as a positive weighted measure: its active knots are emitted as weighted support, the union is sorted once, equal values are coalesced (a merged knot stays pure only if every contributor was pure), and the same arcsine compressor used by ingestion produces the single output state. Extrema are exact unions of the source extrema, so endpoint queries on a merged digest remain exact.
+
+Because the sample count is shared by every position in a storage, all sources carry identical total mass and the 16-bit masses can be unioned unscaled; the general form below reduces to the uniform case. Working unscaled also keeps the merged total far from `u64` saturation. The merged digest reports a sample count of $n dot |G|$ and can continue to accept updates, which weight old mass correctly against new rows. `merge_channels` treats a channel as a contiguous block of $H times W$ positions and, unlike the t-digest kernel, compresses the union in a single pass: knot weights are `u64` and moments accumulate in `f64`, so a second lossy repartition would buy no precision. Merging an empty selection yields an empty single-position digest.
 
 #intuition(
   [Deferred grouping],
@@ -537,7 +542,60 @@ The generic contract now exposes `merge_cells`, `merge_channels`, and `merge_all
   [Fine-grained histories become one group distribution without replaying the original tensor samples. Grouping policy is a cold decision.],
 )
 
-Aggregation latency would not be a performance requirement. Such a future cold merge could allocate temporary vectors and globally sort all input support. The present reducer is used only for buffered ingestion.
+Aggregation latency is not a performance requirement, so the cold merge allocates temporary vectors and globally sorts all input support rather than reusing the worker-local flush scratch.
+
+Merging recompresses already-compressed support, so it is intuitive to expect it to be worse than compressing the pooled stream once. Measurement does not support that intuition. Over 999 probabilities against the *exact* pooled population, merged mean rank error ranged from 0.30x to 1.53x the error of a reference digest fed the pooled stream directly, and was lower on six of eight tested channel layouts. Separated modes benefit most: each source resolves its own mode with its own 32 knots before the union is recompressed, whereas a single digest sees the modes interleaved and must spend its budget on both at once. That comparison lives in `merged_distribution_tracks_the_exact_pooled_population`, which asserts per-workload caps at roughly 2x headroom and additionally requires merged mean error to stay within 2x of the pooled reference.
+
+`backend_accuracy` reports merge fidelity as its own table, merging all 32 positions of each representative workload into one digest and scoring it against the exact pooled population. Quantile Spine is skipped rather than called, and its cells are drawn as a struck-through rule.
+
+#table(
+  columns: (1.35fr, 1fr, 1fr, .85fr),
+  align: (left, right, right, right),
+  table.header(
+    [*Merged workload*],
+    [*K32 mean / max*],
+    [*t-digest mean / max*],
+    [*Spine*],
+  ),
+  [normal], [0.000426 / 0.001220], [0.000753 / 0.001970], [#strike[n/a]],
+  [uniform], [0.000656 / 0.000897], [0.001645 / 0.005659], [#strike[n/a]],
+  [lognormal], [0.000859 / 0.001984], [0.004540 / 0.020050], [#strike[n/a]],
+  [exponential], [0.000846 / 0.001493], [0.003785 / 0.015527], [#strike[n/a]],
+  [laplace], [0.000691 / 0.001500], [0.001599 / 0.005166], [#strike[n/a]],
+  [overlapping-bimodal], [0.000428 / 0.001177], [0.001373 / 0.005538], [#strike[n/a]],
+  [32-level-normal], [0.000137 / 0.000618], [0.009275 / 0.030787], [#strike[n/a]],
+  [50%-zeros], [0.000362 / 0.001130], [0.033803 / 0.250106], [#strike[n/a]],
+  [95%-zero-activations], [0.000240 / 0.002045], [0.000418 / 0.002980], [#strike[n/a]],
+  [heterogeneous-tensor], [0.000978 / 0.002736], [0.007044 / 0.026593], [#strike[n/a]],
+)
+
+Unlike the per-position table, where no backend wins everywhere, K32 had both lower mean and lower maximum merged rank error than t-digest on all ten workloads. The merged digest retains 1,240 bytes against t-digest's 5,708, and the merge itself peaks at 17,880 transient bytes against t-digest's roughly 38,000: the union of 32 states is one `Vec` of at most 1,024 entries, sorted and coalesced in place. These figures cover single merges of one storage; repeated merge-of-merge chains are not yet measured.
+
+== Persistence
+
+Deferred analysis across process boundaries requires a snapshot format, and `to_bytes`,
+`from_bytes`, and `from_payload` now provide one. A snapshot flushes pending rows and stores
+the shape, the shared sample count, and the per-position knots as flat parallel vectors,
+bincode-encoded and zstd-compressed.
+
+The encoding constants travel with the data. `RANK_KNOT_K`, the mass quanta, a format
+version, and a kernel tag are all recorded and checked on load, because those constants are
+documented as unstable internals: a future K64 build must reject a K32 file rather than
+decode masses that no longer mean what it assumes. The kernel tag also occupies the leading
+payload byte that the crate-level loader reads as a t-digest dtype tag, so handing a RankKnot
+snapshot to the t-digest reader is a clean error instead of a misparse. Decoded states are
+validated before use: active masses must normalize, knot values must ascend, and NaN is
+rejected.
+
+`buffer_capacity` is deliberately *not* persisted. It is an ingestion tuning knob that does
+not affect the encoded distribution, so a loaded digest starts from the default capacity and
+a caller who tuned it must reapply that choice. A loaded digest is otherwise a fully live
+collector and can continue to accept updates, weighting restored mass against new rows by
+the restored sample count.
+
+A 1,024-position `f32` digest serialized to 165,914 bytes, or 162.0 bytes per position
+against 208 bytes of live state, since zstd exploits the many inactive knot slots. The
+corresponding t-digest snapshot was 991,701 bytes, or 968.5 bytes per position.
 
 = Future consumer: post-training quantization
 
@@ -654,7 +712,7 @@ A local Apple M4 Divan run with RankKnot’s default capacity 256 and each compa
 - *Separated modes:* linear interpolation across a large unsupported value gap remains a principal failure mode.
 - *Extrema:* current K32 endpoint requests use exact min/max sidecars; the historical K64 interior results did not include endpoint requests.
 - *Throughput scope:* the Apple M4 timings above are local medians. Different tensor widths, Rayon pools, CPUs, and system load can change the comparison.
-- *No consumer evidence:* no RankKnot quantizer, group merge, alert, visualization, or serialization study exists because those APIs are not implemented.
+- *No consumer evidence:* no RankKnot quantizer, alert, or visualization study exists because those APIs are not implemented. Snapshots round-trip correctly, but no application has yet been built on a reloaded digest.
 
 = A deliberately small systems design
 
@@ -675,9 +733,24 @@ struct RankKnotState {
 
 `RankKnotState` is crate-private; the public `RankKnot` type is a zero-sized kernel marker. One `u64` sample count is shared across positions in `RankKnotStorage`. Temporary weights and weighted moments use `u64` and `f64`; persistent representatives round to `f32`. With 256 buffered rows, tensor-scaled retained storage is approximately 208 + 1,024 = 1,232 bytes per position. Worker scratch and object headers are additional.
 
-== One current ingestion reducer
+== One shared reducer
 
-The deterministic reducer currently implements buffered ingestion only. Reusing it for cold merges remains a design direction. Current RankKnot callers cannot access the encoded support, and no RankKnot-specific cache or query-time workspace is retained per position.
+The deterministic boundary/compression reducer is shared by buffered ingestion and by the cold `merge_*` path; only the way weighted support is assembled differs. Current RankKnot callers cannot access the encoded support, and no RankKnot-specific cache or query-time workspace is retained per position.
+
+== Failure reporting
+
+Because kernels are selected statically but do not all implement the same operations, the
+contract has to express "this kernel cannot do that" without aborting the caller. Every
+fallible call returns `monatq::Result`; a missing kernel operation is `Error::Unsupported`,
+carrying the kernel and operation names. Tooling that sweeps all backends, such as
+`backend_accuracy`, uses this to skip a kernel and draw a placeholder rather than crash the
+run, and the Python bindings translate it into `NotImplementedError` instead of letting a
+Rust panic cross the FFI boundary.
+
+Operations that cannot fail keep infallible signatures, so a quantile query needs no error
+handling. Snapshot problems are `Error::InvalidSnapshot`, kept distinct from `Error::Io`:
+the former means the bytes were read successfully but do not describe a digest this build
+can trust, which is what a version, kernel, or invariant mismatch actually is.
 
 == Minimal configuration
 
@@ -690,7 +763,8 @@ The deterministic reducer currently implements buffered ingestion only. Reusing 
     [knot count], [`32`], [fixed internal constant],
     [mass quanta], [`65,535`], [fixed internal `u16` normalization],
     [rank scale], [arcsine], [fixed internal targets],
-    [NaN], [unsupported], [not validated on update; panics during flush],
+    [NaN], [unsupported], [documented precondition; unchecked, panics during flush],
+    [sample length], [checked], [`Error::ShapeMismatch`; rejected before buffering],
     [infinities], [supported], [protected pure singleton groups and exact endpoints],
   )
 ]
@@ -709,17 +783,21 @@ Only `buffer_capacity` is public configuration. The mass encoding, knot count, a
   [Discrete data], [retained tie intervals, constants, and deterministic signed-zero extrema],
   [Exceptional values], [protected positive and negative infinities],
   [Encoding], [ordered support, active masses summing to 65,535, and ties-to-even quantization],
-  [Accuracy/memory], [`backend_accuracy` representative and adversarial suites with allocator instrumentation],
+  [Merging], [cell/channel/tensor unions, extrema, empty selections, post-merge updates, and tie-aware rank error against exact pooled truth on eight workloads],
+  [Persistence], [byte and file round trips, empty digests, signed zero and infinities, post-load updates, cross-kernel rejection, truncation, and each snapshot guard],
+  [Accuracy/memory], [`backend_accuracy` representative, tensor-wide merge, and adversarial suites with allocator instrumentation],
   [Throughput], [Divan benchmarks for normal and uniform tensors at two representative sizes],
+  [Error contract], [rejected sample lengths leave the digest untouched, out-of-bounds positions, unsupported-kernel reporting, and a `Display` that does not repeat its own source],
 )
 
 == Open work
 
-- define and test an atomic NaN policy, or make the NaN-free precondition part of the stable contract;
+- revisit the NaN precondition if a caller ever needs validated ingestion; it is currently a deliberate documented contract rather than an open question;
 - test requantization drift through at least one million updates and repeated shifts;
 - check in reproducible current K32 accuracy and benchmark result artifacts with platform metadata;
-- replace the RankKnot and Quantile Spine `merge_*` panic stubs with implementations and fidelity tests;
-- add RankKnot state export or serialization before claiming durable deferred analysis;
+- implement the Quantile Spine `merge_*` operations, which currently report `Unsupported`, and add fidelity tests;
+- measure repeated merge-of-merge chains, which the current single-merge fidelity table does not cover;
+- add RankKnot state export, so a cold consumer can read weighted knots directly rather than only through quantile queries;
 - build visualization, PTQ, or threshold consumers and measure application outcomes;
 - continue throughput work on smaller repeated-flush tensors, where K32 still trails t-digest locally.
 
@@ -727,14 +805,16 @@ Ascending streams, blocked modes, and crafted float patterns remain useful diagn
 
 = Risks and limitations
 
-- *Approximation, not archival:* individual observations and temporal order are irrecoverable, and RankKnot has no snapshot format.
+- *Approximation, not archival:* a snapshot preserves the compressed summary, but individual observations and their temporal order are irrecoverable from it.
 - *Representative data:* no summary can infer a deployment regime that was never observed.
 - *Marginal state:* cross-position covariance and sample identity are absent.
 - *Requantization drift:* 16-bit masses compactly encode 32 locations but repeatedly approximate old probability.
-- *Shared count and NaN:* NaN currently reaches the buffer and panics during flush. Per-position missingness or atomic rejection requires revised semantics or extra work.
+- *Shared count and NaN:* NaN-free input is a precondition rather than a checked invariant. NaN reaches the buffer and panics during flush; this is the one remaining panic on the ingestion path, deliberately kept off the hot loop. Per-position missingness would require revised semantics.
 - *Tail and mode parity:* no backend wins every workload; sparse zero activations, extreme tails, and separated modes remain important counterexamples.
 - *Working memory:* the 208-byte title names state only. The default input buffer raises tensor-scaled retained storage to about 1,232 bytes per `f32` position, and worker scratch raises peak heap.
-- *Unavailable consumers:* merge, analysis, zero-filtering, serialization, and visualization methods are contract stubs that panic for RankKnot; knots are crate-private; PTQ and direct support export are absent.
+- *Unavailable consumers:* analysis, zero-filtering, and visualization report `Error::Unsupported` for RankKnot; knots are crate-private; PTQ and direct support export are absent.
+- *Unproven format stability:* the snapshot format is versioned and validated, but it has only ever been written and read by one build. Cross-version and cross-platform round trips are untested.
+- *Merge is still lossy:* a single merge measured no worse than one-pass pooled compression on the tested workloads, but it does recompress approximate support. Repeated merge-of-merge chains are unmeasured and are the expected place for drift to appear.
 - *Fixed memory:* no 208-byte state offers tiny distribution-free error for every stream.
 
 #callout([The design principle], [Collection should preserve a useful approximation of the observed distribution while making as few downstream choices as possible. RankKnot spends its state budget on rank mass, ties, and extrema; everything else is deferred.], tone: green)
@@ -745,10 +825,12 @@ Current K32 Rust behavior is defined and exercised by:
 
 - `monatq/src/kernels/rankknot.rs`
 - `monatq/tests/rankknot.rs`
+- `monatq/tests/error_shape.rs`
+- `monatq/src/error.rs`
 - `monatq/src/bin/backend_accuracy.rs`
 - `monatq/benches/tensor_digest.rs`
 
-Run `cargo run -p monatq --release --bin backend_accuracy` for the current accuracy/memory report and `cargo bench -p monatq --bench tensor_digest` for throughput. The numeric K32 results in this note came from a local Apple M4 run and are not yet checked in as a machine-readable artifact.
+Run `cargo run -p monatq --release --bin backend_accuracy` for the current accuracy/memory report, which prints per-position, tensor-wide merge, and adversarial tables, and `cargo bench -p monatq --bench tensor_digest` for throughput. The numeric K32 results in this note came from a local Apple M4 run and are not yet checked in as a machine-readable artifact.
 
 Historical K64 feasibility evidence remains in:
 
@@ -762,6 +844,6 @@ That script simulates 48-location `u32` and 64-location `u16` layouts and invoke
 
 Current RankKnot is a working K32, `f32`-only quantile backend. Its 208-byte per-position state preserves exact extrema and retained pure ties, its default live allocation is substantially smaller than both comparison backends, and current Rust accuracy is generally stronger than t-digest on the representative suite without being uniformly best. Local throughput beats t-digest on the larger tested tensor and still trails it on smaller repeated-flush cases.
 
-The broader K64 Python results remain useful evidence for the design’s capacity trade-off, but they are not current-backend results. Merge, analysis, zero-filtering, serialization, and visualization are present in the generic contract but remain panic stubs for RankKnot; direct knot access, clipping search, and quantization are absent. The next decisions should be driven by long-stream drift, reproducible cross-platform throughput, an explicit NaN contract, and real consumer studies rather than by the historical prototype alone.
+The broader K64 Python results remain useful evidence for the design’s capacity trade-off, but they are not current-backend results. Cold regrouping and persistence are now implemented through `merge_cells`, `merge_channels`, `merge_all`, and the versioned snapshot format; analysis, zero filtering, and visualization are present in the generic contract but report `Error::Unsupported` for RankKnot, and direct knot access, clipping search, and quantization are absent. The next decisions should be driven by long-stream drift, reproducible cross-platform throughput, an explicit NaN contract, and real consumer studies rather than by the historical prototype alone.
 
 #bibliography("references.bib", title: [References])

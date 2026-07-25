@@ -31,7 +31,7 @@ impl Backend {
 }
 
 impl Digest {
-    pub fn update(&mut self, sample: &[f32]) {
+    pub fn update(&mut self, sample: &[f32]) -> crate::Result<()> {
         match self {
             Self::TDigest(digest) => digest.update(sample),
             Self::QuantileSpine(digest) => digest.update(sample),
@@ -53,6 +53,18 @@ impl Digest {
             Self::QuantileSpine(digest) => digest.quantile(q),
             Self::RankKnot(digest) => digest.quantile(q),
         }
+    }
+
+    /// Merge every tensor position into a one-position digest.
+    ///
+    /// Returns [`crate::Error::Unsupported`] for kernels without a merge implementation, so
+    /// reporting tools can render a placeholder instead of calling and crashing.
+    pub fn merge_all(&mut self) -> crate::Result<Digest> {
+        Ok(match self {
+            Self::TDigest(digest) => Digest::TDigest(digest.merge_all()?),
+            Self::QuantileSpine(digest) => Digest::QuantileSpine(digest.merge_all()?),
+            Self::RankKnot(digest) => Digest::RankKnot(digest.merge_all()?),
+        })
     }
 
     pub fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {

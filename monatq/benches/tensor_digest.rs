@@ -46,7 +46,7 @@ fn bench_update(
         .with_inputs(|| (make_data(numel * samples), backend.create(shape)))
         .bench_values(|(data, mut digest)| {
             for sample in data.chunks_exact(numel) {
-                digest.update(sample);
+                digest.update(sample).unwrap();
             }
             digest.flush();
             black_box((data, digest))
@@ -76,7 +76,7 @@ fn query_64x64_p99(bencher: divan::Bencher, backend: Backend) {
             let data = uniform_data(SMALL_NUMEL * SMALL_SAMPLES);
             let mut digest = backend.create(&[64, 64]);
             for sample in data.chunks_exact(SMALL_NUMEL) {
-                digest.update(sample);
+                digest.update(sample).unwrap();
             }
             digest.flush();
             digest

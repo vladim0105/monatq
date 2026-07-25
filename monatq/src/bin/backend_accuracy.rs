@@ -97,7 +97,9 @@ fn warm_backend_paths() {
     for &backend in BACKENDS {
         let mut digest = backend.create(&[1]);
         for index in 0..512 {
-            digest.update(&[(index as f32 * 0.125).sin()]);
+            digest
+                .update(&[(index as f32 * 0.125).sin()])
+                .expect("warmup update");
         }
         digest.flush();
         std::hint::black_box(digest.quantile(0.5));
@@ -152,7 +154,7 @@ fn measure(backend: Backend, data: &[f32], numel: usize, quantiles: &[f32]) -> A
     let baseline = begin_heap_measurement();
     let mut digest = backend.create(&[numel]);
     for sample in data.chunks_exact(numel) {
-        digest.update(sample);
+        digest.update(sample).expect("update failed");
     }
     digest.flush();
     let heap = finish_heap_measurement(baseline);
@@ -200,6 +202,21 @@ fn print_table_header(title: &str) {
     println!("{}", "─".repeat(124));
 }
 
+fn print_merge_table_header(title: &str) {
+    println!("\n{title}");
+    println!("{}", "─".repeat(124));
+    println!(
+        "{:<28}  {:<16}  {:>15}  {:>27}  {:>12}  {:>12}",
+        "Workload",
+        "Backend",
+        "Mean rank err",
+        "Max rank err (worst q)",
+        "Merged live",
+        "Merge peak"
+    );
+    println!("{}", "─".repeat(124));
+}
+
 fn hsv_to_rgb(hue: f64, saturation: f64, value: f64) -> (u8, u8, u8) {
     let chroma = value * saturation;
     let hue_sector = hue / 60.0;
@@ -234,6 +251,21 @@ fn color_metric(value: String, score: f64) -> String {
 
 fn format_bytes(bytes: usize) -> String {
     format!("{bytes} B")
+}
+
+/// Render a struck-through rule across a metric column.
+///
+/// Backends without a merge implementation must not be called at all, so their cells carry a
+/// line rather than a number. The rule is drawn with box characters so it stays visible on
+/// terminals that ignore the ANSI strikethrough attribute.
+fn struck_cell(width: usize) -> String {
+    format!("\x1b[9;2m{}\x1b[0m", "─".repeat(width))
+}
+
+/// Render struck-through text centered in a metric column, so the reason for the line is
+/// legible without consulting the legend and the row still fits the table rule.
+fn struck_text(text: &str, width: usize) -> String {
+    format!("\x1b[9;2m{text:^width$}\x1b[0m")
 }
 
 fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
@@ -312,6 +344,125 @@ fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
     println!();
 }
 
+/// Measure the tie-aware rank accuracy of `backend`'s tensor-wide merge.
+///
+/// The merged digest is compared against the exact pooled population of every tensor
+/// position, so this reports the fidelity of the merge itself rather than agreement with
+/// another approximation. Heap figures cover only the merge call and the digest it returns.
+fn measure_merge(
+    backend: Backend,
+    data: &[f32],
+    numel: usize,
+    pooled_truth: &[f32],
+    quantiles: &[f32],
+) -> monatq::Result<Accuracy> {
+    let mut digest = backend.create(&[numel]);
+    for sample in data.chunks_exact(numel) {
+        digest.update(sample)?;
+    }
+    digest.flush();
+
+    let baseline = begin_heap_measurement();
+    let mut merged = digest.merge_all()?;
+    let heap = finish_heap_measurement(baseline);
+    drop(digest);
+
+    let estimates = merged.quantiles(quantiles);
+    let mut sum = 0.0;
+    let mut max = 0.0f64;
+    let mut worst_quantile = 0.0;
+    for (q_index, &q) in quantiles.iter().enumerate() {
+        let error = rank_interval_error(pooled_truth, estimates[q_index][0], q);
+        sum += error;
+        if error > max {
+            max = error;
+            worst_quantile = q;
+        }
+    }
+
+    let before_drop = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    drop(merged);
+    let after_drop = LIVE_HEAP_BYTES.load(Ordering::Relaxed);
+    let live_heap_bytes = before_drop.saturating_sub(after_drop);
+
+    Ok(Accuracy {
+        mean_rank_error: sum / quantiles.len() as f64,
+        max_rank_error: max,
+        worst_quantile,
+        live_heap_bytes,
+        peak_heap_bytes: heap.peak_bytes,
+    })
+}
+
+fn merge_report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
+    let mut pooled_truth = data.to_vec();
+    pooled_truth.sort_unstable_by(f32::total_cmp);
+
+    // A kernel without a merge implementation reports `Error::Unsupported` rather than
+    // panicking, so the table can simply skip it. Any other error is a real failure and
+    // must not be silently rendered as "unimplemented".
+    let results = BACKENDS
+        .iter()
+        .filter_map(|&backend| {
+            match measure_merge(backend, data, numel, &pooled_truth, quantiles) {
+                Ok(accuracy) => Some((backend, accuracy)),
+                Err(monatq::Error::Unsupported { .. }) => None,
+                Err(error) => panic!("{backend:?} merge failed on {name}: {error}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let extreme = |select: fn(&Accuracy) -> f64, fold: fn(f64, f64) -> f64, seed: f64| {
+        results
+            .iter()
+            .map(|(_, accuracy)| select(accuracy))
+            .fold(seed, fold)
+    };
+    let best_mean = extreme(|a| a.mean_rank_error, f64::min, f64::INFINITY);
+    let worst_mean = extreme(|a| a.mean_rank_error, f64::max, f64::NEG_INFINITY);
+    let best_max = extreme(|a| a.max_rank_error, f64::min, f64::INFINITY);
+    let worst_max = extreme(|a| a.max_rank_error, f64::max, f64::NEG_INFINITY);
+    let best_live = extreme(|a| a.live_heap_bytes as f64, f64::min, f64::INFINITY);
+    let worst_live = extreme(|a| a.live_heap_bytes as f64, f64::max, f64::NEG_INFINITY);
+    let best_peak = extreme(|a| a.peak_heap_bytes as f64, f64::min, f64::INFINITY);
+    let worst_peak = extreme(|a| a.peak_heap_bytes as f64, f64::max, f64::NEG_INFINITY);
+
+    for &backend in BACKENDS {
+        let backend_name = format!("{backend:?}");
+        let Some((_, accuracy)) = results.iter().find(|(candidate, _)| *candidate == backend)
+        else {
+            println!(
+                "{name:<28}  {backend_name:<16}  {}  {}  {}  {}",
+                struck_cell(15),
+                struck_text("merge unimplemented", 27),
+                struck_cell(12),
+                struck_cell(12),
+            );
+            continue;
+        };
+        let mean = color_metric(
+            format!("{:>15.8}", accuracy.mean_rank_error),
+            performance_score(accuracy.mean_rank_error, best_mean, worst_mean),
+        );
+        let max = color_metric(
+            format!(
+                "{:>15.8} (q={:.5})",
+                accuracy.max_rank_error, accuracy.worst_quantile
+            ),
+            performance_score(accuracy.max_rank_error, best_max, worst_max),
+        );
+        let live_heap = color_metric(
+            format!("{:>12}", format_bytes(accuracy.live_heap_bytes)),
+            performance_score(accuracy.live_heap_bytes as f64, best_live, worst_live),
+        );
+        let peak_heap = color_metric(
+            format!("{:>12}", format_bytes(accuracy.peak_heap_bytes)),
+            performance_score(accuracy.peak_heap_bytes as f64, best_peak, worst_peak),
+        );
+        println!("{name:<28}  {backend_name:<16}  {mean}  {max}  {live_heap}  {peak_heap}");
+    }
+    println!();
+}
+
 fn laplace_sample(state: &mut u32) -> f32 {
     let probability = xorshift32(state);
     if probability < 0.5 {
@@ -326,85 +477,106 @@ fn quantize(value: f32, minimum: f32, maximum: f32, levels: usize) -> f32 {
     minimum + ((value.clamp(minimum, maximum) - minimum) / step).round() * step
 }
 
-fn regular_reports() {
-    print_table_header("Representative distributions (32 tensor positions)");
+const N: usize = 100_000;
+const NUMEL: usize = 32;
+const QUANTILES: &[f32] = &[0.001, 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 0.999];
 
-    const N: usize = 100_000;
-    const NUMEL: usize = 32;
-    const QUANTILES: &[f32] = &[0.001, 0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99, 0.999];
+/// Representative workload names, in report order. `heterogeneous-tensor` is last because it
+/// deliberately gives every tensor position a different distribution.
+const REPRESENTATIVE_WORKLOADS: &[&str] = &[
+    "normal",
+    "uniform",
+    "lognormal",
+    "exponential",
+    "laplace",
+    "overlapping-bimodal",
+    "32-level-normal",
+    "50%-zeros",
+    "95%-zero-activations",
+    "heterogeneous-tensor",
+];
+
+/// Build one representative workload.
+///
+/// Datasets are regenerated per table rather than cached because each is `N * NUMEL` f32s;
+/// holding all of them at once would dominate the heap figures this binary reports.
+fn representative_dataset(name: &str) -> Vec<f32> {
+    let index = REPRESENTATIVE_WORKLOADS
+        .iter()
+        .position(|&candidate| candidate == name)
+        .expect("unknown representative workload");
     let normal = Normal::new(0.0, 1.0).unwrap();
     let uniform = Uniform::new(-2.0, 3.0).unwrap();
     let lognormal = LogNormal::new(0.0, 1.0).unwrap();
 
-    for (index, name) in [
-        "normal",
-        "uniform",
-        "lognormal",
-        "exponential",
-        "laplace",
-        "overlapping-bimodal",
-        "32-level-normal",
-        "50%-zeros",
-        "95%-zero-activations",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut state = 0x6a09_e667 ^ (index as u32).wrapping_mul(0x9e37_79b9);
-        let data = (0..N * NUMEL)
-            .map(|_| match name {
-                "normal" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
-                "uniform" => uniform.inverse_cdf(xorshift32(&mut state)) as f32,
-                "lognormal" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
-                "exponential" => -xorshift32(&mut state).ln() as f32,
-                "laplace" => laplace_sample(&mut state),
-                "overlapping-bimodal" => {
-                    let center = if xorshift32(&mut state) < 0.35 {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                    center + normal.inverse_cdf(xorshift32(&mut state)) as f32
-                }
-                "32-level-normal" => quantize(
-                    normal.inverse_cdf(xorshift32(&mut state)) as f32,
-                    -4.0,
-                    4.0,
-                    32,
-                ),
-                "50%-zeros" if xorshift32(&mut state) < 0.5 => 0.0,
-                "50%-zeros" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
-                "95%-zero-activations" if xorshift32(&mut state) < 0.95 => 0.0,
-                "95%-zero-activations" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
-                _ => unreachable!(),
-            })
-            .collect::<Vec<_>>();
-        report(name, &data, NUMEL, QUANTILES);
-    }
-
     // Real tensors rarely have identically distributed positions. Mix shapes,
     // scales, ties, and skew across positions in the same digest.
-    let mut state = 0x510e_527f;
-    let heterogeneous = (0..N * NUMEL)
-        .map(|index| {
-            let position = index % NUMEL;
-            match position % 6 {
-                0 => normal.inverse_cdf(xorshift32(&mut state)) as f32,
-                1 => (position as f32 + 1.0) * xorshift32(&mut state) as f32,
-                2 => -xorshift32(&mut state).ln() as f32,
-                3 => laplace_sample(&mut state) * (1.0 + position as f32 / 8.0),
-                4 => quantize(
-                    normal.inverse_cdf(xorshift32(&mut state)) as f32,
-                    -3.0,
-                    3.0,
-                    16,
-                ),
-                _ if xorshift32(&mut state) < 0.8 => 0.0,
-                _ => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+    if name == "heterogeneous-tensor" {
+        let mut state = 0x510e_527f;
+        return (0..N * NUMEL)
+            .map(|index| {
+                let position = index % NUMEL;
+                match position % 6 {
+                    0 => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                    1 => (position as f32 + 1.0) * xorshift32(&mut state) as f32,
+                    2 => -xorshift32(&mut state).ln() as f32,
+                    3 => laplace_sample(&mut state) * (1.0 + position as f32 / 8.0),
+                    4 => quantize(
+                        normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                        -3.0,
+                        3.0,
+                        16,
+                    ),
+                    _ if xorshift32(&mut state) < 0.8 => 0.0,
+                    _ => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+                }
+            })
+            .collect();
+    }
+
+    let mut state = 0x6a09_e667 ^ (index as u32).wrapping_mul(0x9e37_79b9);
+    (0..N * NUMEL)
+        .map(|_| match name {
+            "normal" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+            "uniform" => uniform.inverse_cdf(xorshift32(&mut state)) as f32,
+            "lognormal" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+            "exponential" => -xorshift32(&mut state).ln() as f32,
+            "laplace" => laplace_sample(&mut state),
+            "overlapping-bimodal" => {
+                let center = if xorshift32(&mut state) < 0.35 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                center + normal.inverse_cdf(xorshift32(&mut state)) as f32
             }
+            "32-level-normal" => quantize(
+                normal.inverse_cdf(xorshift32(&mut state)) as f32,
+                -4.0,
+                4.0,
+                32,
+            ),
+            "50%-zeros" if xorshift32(&mut state) < 0.5 => 0.0,
+            "50%-zeros" => normal.inverse_cdf(xorshift32(&mut state)) as f32,
+            "95%-zero-activations" if xorshift32(&mut state) < 0.95 => 0.0,
+            "95%-zero-activations" => lognormal.inverse_cdf(xorshift32(&mut state)) as f32,
+            _ => unreachable!(),
         })
-        .collect::<Vec<_>>();
-    report("heterogeneous-tensor", &heterogeneous, NUMEL, QUANTILES);
+        .collect()
+}
+
+fn regular_reports() {
+    print_table_header("Representative distributions (32 tensor positions)");
+    for &name in REPRESENTATIVE_WORKLOADS {
+        report(name, &representative_dataset(name), NUMEL, QUANTILES);
+    }
+}
+
+fn merge_reports() {
+    print_merge_table_header("Tensor-wide merge (32 positions merged into 1)");
+    for &name in REPRESENTATIVE_WORKLOADS {
+        merge_report(name, &representative_dataset(name), NUMEL, QUANTILES);
+    }
 }
 
 fn coherent_stripes(n: usize, batch_len: usize, bands: usize, repeats: usize) -> Vec<f32> {
@@ -588,6 +760,10 @@ fn main() {
         "Live is retained after flush; peak covers backend construction, update, flush, and ingestion workspace."
     );
     println!("Input data, exact truth, and query outputs are excluded.");
+    println!(
+        "Merge rows compare a tensor-wide merge against the exact pooled population; a struck-through line marks a backend whose merge is unimplemented."
+    );
     regular_reports();
+    merge_reports();
     adversarial_reports();
 }

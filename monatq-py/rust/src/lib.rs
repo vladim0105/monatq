@@ -1,8 +1,31 @@
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{
+    PyIOError, PyIndexError, PyNotImplementedError, PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Translate a monatq error into the closest Python exception.
+///
+/// Before monatq returned `Result`, these conditions were Rust panics that crossed the FFI
+/// boundary as `pyo3_runtime.PanicException` with a Rust backtrace attached. Mapping them
+/// gives Python callers ordinary, catchable exceptions instead.
+fn to_py_err(error: monatq::Error) -> PyErr {
+    match error {
+        monatq::Error::Unsupported { .. } => PyNotImplementedError::new_err(error.to_string()),
+        monatq::Error::IndexOutOfBounds { .. } => PyIndexError::new_err(error.to_string()),
+        monatq::Error::ShapeMismatch { .. } | monatq::Error::InvalidConfig { .. } => {
+            PyValueError::new_err(error.to_string())
+        }
+        monatq::Error::InvalidSnapshot(_) => PyValueError::new_err(error.to_string()),
+        // Display no longer repeats the underlying cause, so report the chain explicitly.
+        monatq::Error::Io(ref inner) => PyIOError::new_err(format!("{error}: {inner}")),
+        // `monatq::Error` is `#[non_exhaustive]`, so a future variant must not break this
+        // build. Anything unrecognized becomes a plain RuntimeError rather than a panic.
+        ref other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
 
 fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
     let s = obj.str()?.to_string();
@@ -73,7 +96,7 @@ where
         }
         let mut vec = vec![T::default(); numel];
         buf.copy_to_slice(py, &mut vec)?;
-        d.update(&vec);
+        d.update(&vec).map_err(to_py_err)?;
         return Ok(());
     }
     // Torch tensor fast path
@@ -84,7 +107,7 @@ where
             )));
         }
         let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, n) };
-        d.update(slice);
+        d.update(slice).map_err(to_py_err)?;
         return Ok(());
     }
     // Python list fallback
@@ -96,7 +119,7 @@ where
             numel,
         )));
     }
-    d.update(&vec);
+    d.update(&vec).map_err(to_py_err)?;
     Ok(())
 }
 
@@ -159,44 +182,44 @@ impl Inner {
             Inner::I32(d) => d.quantiles(qs),
         }
     }
-    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> monatq::Result<Vec<f32>> {
         self.flush();
         match self {
             Inner::F32(d) => d.cell_quantiles(idx, qs),
             Inner::I32(d) => d.cell_quantiles(idx, qs),
         }
     }
-    fn analyze(&mut self) -> Vec<monatq::Distribution> {
+    fn analyze(&mut self) -> monatq::Result<Vec<monatq::Distribution>> {
         match self {
             Inner::F32(d) => d.analyze(),
             Inner::I32(d) => d.analyze(),
         }
     }
-    fn merge_cells(&mut self, indices: &[usize]) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_cells(indices)),
-            Inner::I32(d) => Inner::I32(d.merge_cells(indices)),
-        }
+    fn merge_cells(&mut self, indices: &[usize]) -> monatq::Result<Self> {
+        Ok(match self {
+            Inner::F32(d) => Inner::F32(d.merge_cells(indices)?),
+            Inner::I32(d) => Inner::I32(d.merge_cells(indices)?),
+        })
     }
-    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_channels(channel_indices)),
-            Inner::I32(d) => Inner::I32(d.merge_channels(channel_indices)),
-        }
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> monatq::Result<Self> {
+        Ok(match self {
+            Inner::F32(d) => Inner::F32(d.merge_channels(channel_indices)?),
+            Inner::I32(d) => Inner::I32(d.merge_channels(channel_indices)?),
+        })
     }
-    fn merge_all(&mut self) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_all()),
-            Inner::I32(d) => Inner::I32(d.merge_all()),
-        }
+    fn merge_all(&mut self) -> monatq::Result<Self> {
+        Ok(match self {
+            Inner::F32(d) => Inner::F32(d.merge_all()?),
+            Inner::I32(d) => Inner::I32(d.merge_all()?),
+        })
     }
-    fn save(&mut self, path: &str) -> std::io::Result<()> {
+    fn save(&mut self, path: &str) -> monatq::Result<()> {
         match self {
             Inner::F32(d) => d.save(path),
             Inner::I32(d) => d.save(path),
         }
     }
-    fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
+    fn visualize_until(&mut self, stop: &AtomicBool) -> monatq::Result<()> {
         match self {
             Inner::F32(d) => d.visualize_until(stop),
             Inner::I32(d) => d.visualize_until(stop),
@@ -263,39 +286,48 @@ impl PyTensorDigest {
         self.inner.quantiles(&qs)
     }
 
-    fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> Vec<f32> {
-        self.inner.cell_quantiles(idx, &qs)
+    fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> PyResult<Vec<f32>> {
+        self.inner.cell_quantiles(idx, &qs).map_err(to_py_err)
     }
 
-    fn analyze(&mut self) -> Vec<String> {
-        self.inner.analyze().iter().map(|d| d.to_string()).collect()
+    fn analyze(&mut self) -> PyResult<Vec<String>> {
+        Ok(self
+            .inner
+            .analyze()
+            .map_err(to_py_err)?
+            .iter()
+            .map(|d| d.to_string())
+            .collect())
     }
 
-    fn merge_cells(&mut self, indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_cells(&indices),
-        }
+    fn merge_cells(&mut self, indices: Vec<usize>) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self.inner.merge_cells(&indices).map_err(to_py_err)?,
+        })
     }
 
-    fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_channels(&channel_indices),
-        }
+    fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self
+                .inner
+                .merge_channels(&channel_indices)
+                .map_err(to_py_err)?,
+        })
     }
 
-    fn merge_all(&mut self) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_all(),
-        }
+    fn merge_all(&mut self) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self.inner.merge_all().map_err(to_py_err)?,
+        })
     }
 
     fn save(&mut self, path: &str) -> PyResult<()> {
-        self.inner.save(path).map_err(PyIOError::new_err)
+        self.inner.save(path).map_err(to_py_err)
     }
 
     #[staticmethod]
     fn load(path: &str) -> PyResult<PyTensorDigest> {
-        let inner = monatq::load(path).map_err(PyIOError::new_err)?.into();
+        let inner = monatq::load(path).map_err(to_py_err)?.into();
         Ok(PyTensorDigest { inner })
     }
 
@@ -303,7 +335,7 @@ impl PyTensorDigest {
         let stop = AtomicBool::new(false);
 
         let result = py.detach(|| {
-            std::thread::scope(|scope| -> PyResult<std::io::Result<()>> {
+            std::thread::scope(|scope| -> PyResult<monatq::Result<()>> {
                 let handle = scope.spawn(|| self.inner.visualize_until(&stop));
                 loop {
                     if handle.is_finished() {
@@ -319,7 +351,7 @@ impl PyTensorDigest {
             })
         });
 
-        result?.map_err(PyIOError::new_err)
+        result?.map_err(to_py_err)
     }
 }
 

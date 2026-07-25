@@ -811,11 +811,14 @@ impl<T: TensorValue> StorageOperations<T> for QuantileSpineStorage<T> {
     fn shape(&self) -> &[usize] {
         self.shape()
     }
-    fn total_weight(&self, idx: usize) -> u32 {
-        self.total_weight(idx)
+    fn total_weight(&self, idx: usize) -> crate::Result<u32> {
+        crate::error::check_index(idx, self.numel())?;
+        Ok(self.total_weight(idx))
     }
-    fn update(&mut self, data: &[T]) {
-        self.update(data)
+    fn update(&mut self, data: &[T]) -> crate::Result<()> {
+        crate::error::check_sample_len(data.len(), self.numel())?;
+        self.update(data);
+        Ok(())
     }
     fn flush(&mut self) {
         self.flush()
@@ -826,49 +829,50 @@ impl<T: TensorValue> StorageOperations<T> for QuantileSpineStorage<T> {
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
         self.quantiles(qs)
     }
-    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
-        self.cell_quantiles(idx, qs)
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> crate::Result<Vec<f32>> {
+        crate::error::check_index(idx, self.numel())?;
+        Ok(self.cell_quantiles(idx, qs))
     }
-    fn merge_cells(&mut self, _indices: &[usize]) -> Self {
-        unimplemented!("QuantileSpine cell merging is not implemented")
+    fn merge_cells(&mut self, _indices: &[usize]) -> crate::Result<Self> {
+        crate::error::unsupported("QuantileSpine", "merge_cells")
     }
-    fn merge_channels(&mut self, _channel_indices: &[usize]) -> Self {
-        unimplemented!("QuantileSpine channel merging is not implemented")
+    fn merge_channels(&mut self, _channel_indices: &[usize]) -> crate::Result<Self> {
+        crate::error::unsupported("QuantileSpine", "merge_channels")
     }
-    fn merge_all(&mut self) -> Self {
-        unimplemented!("QuantileSpine tensor merging is not implemented")
+    fn merge_all(&mut self) -> crate::Result<Self> {
+        crate::error::unsupported("QuantileSpine", "merge_all")
     }
-    fn analyze(&mut self) -> Vec<crate::Distribution> {
-        unimplemented!("QuantileSpine distribution analysis is not implemented")
+    fn analyze(&mut self) -> crate::Result<Vec<crate::Distribution>> {
+        crate::error::unsupported("QuantileSpine", "analyze")
     }
-    fn without_zeros(&mut self) -> Self {
-        unimplemented!("QuantileSpine zero filtering is not implemented")
+    fn without_zeros(&mut self) -> crate::Result<Self> {
+        crate::error::unsupported("QuantileSpine", "without_zeros")
     }
-    fn to_bytes(&mut self) -> std::io::Result<Vec<u8>>
+    fn to_bytes(&mut self) -> crate::Result<Vec<u8>>
     where
         T: serde::Serialize,
     {
-        unimplemented!("QuantileSpine serialization is not implemented")
+        crate::error::unsupported("QuantileSpine", "to_bytes")
     }
-    fn from_bytes(_bytes: &[u8]) -> std::io::Result<Self>
+    fn from_bytes(_bytes: &[u8]) -> crate::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        unimplemented!("QuantileSpine deserialization is not implemented")
+        crate::error::unsupported("QuantileSpine", "from_bytes")
     }
-    fn from_payload(_payload: &[u8]) -> std::io::Result<Self>
+    fn from_payload(_payload: &[u8]) -> crate::Result<Self>
     where
         T: serde::de::DeserializeOwned,
     {
-        unimplemented!("QuantileSpine payload deserialization is not implemented")
+        crate::error::unsupported("QuantileSpine", "from_payload")
     }
     #[cfg(feature = "visualize")]
-    fn visualize(&mut self) -> std::io::Result<()> {
-        unimplemented!("QuantileSpine visualization is not implemented")
+    fn visualize(&mut self) -> crate::Result<()> {
+        crate::error::unsupported("QuantileSpine", "visualize")
     }
     #[cfg(feature = "visualize")]
-    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> std::io::Result<()> {
-        unimplemented!("QuantileSpine visualization is not implemented")
+    fn visualize_until(&mut self, _stop: &std::sync::atomic::AtomicBool) -> crate::Result<()> {
+        crate::error::unsupported("QuantileSpine", "visualize_until")
     }
 }
 

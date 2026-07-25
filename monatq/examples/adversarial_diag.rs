@@ -26,9 +26,9 @@ fn eval(values: &[f32], config: QuantileSpineConfig) -> (f64, f64) {
     let quantiles = quantile_grid();
     let mut spine = TensorDigest::<_, QuantileSpine>::with_config(&[1], config);
     for &value in values {
-        spine.update(&[value]);
+        spine.update(&[value]).unwrap();
     }
-    let estimates = spine.cell_quantiles(0, &quantiles);
+    let estimates = spine.cell_quantiles(0, &quantiles).unwrap();
     let mut sorted = values.to_vec();
     sorted.sort_unstable_by(f32::total_cmp);
     let errors: Vec<f64> = quantiles
@@ -159,16 +159,16 @@ fn main() {
     };
     for _ in 0..N {
         let v = rand();
-        spine.update(&[v]);
+        spine.update(&[v]).unwrap();
     }
     let mut batches_needed = None;
     for batch in 1..=20 {
         for _ in 0..BATCH_LEN {
             let v = 5.0 + rand();
-            spine.update(&[v]);
+            spine.update(&[v]).unwrap();
         }
         spine.flush();
-        let median = spine.cell_quantiles(0, &[0.5])[0];
+        let median = spine.cell_quantiles(0, &[0.5]).unwrap()[0];
         if batches_needed.is_none() && (median - 5.5).abs() < 0.05 {
             batches_needed = Some(batch);
         }

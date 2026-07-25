@@ -24,7 +24,7 @@ fn make_digest() -> TensorDigest<f32, monatq::TDigest> {
         .map(|_| dist.inverse_cdf(xorshift32(&mut rng)) as f32)
         .collect();
     for sample in data.chunks_exact(NUMEL) {
-        td.update(sample);
+        td.update(sample).unwrap();
     }
     td
 }
