@@ -75,18 +75,55 @@ fn print_table_header(title: &str) {
     println!("{}", "─".repeat(105));
 }
 
+fn bold(value: String, is_best: bool) -> String {
+    if is_best {
+        format!("\x1b[1m{value}\x1b[0m")
+    } else {
+        value
+    }
+}
+
 fn report(name: &str, data: &[f32], numel: usize, quantiles: &[f32]) {
-    let baseline = measure(Backend::BASELINE, data, numel, quantiles);
-    for &backend in BACKENDS {
-        let accuracy = measure(backend, data, numel, quantiles);
+    let results = BACKENDS
+        .iter()
+        .map(|&backend| (backend, measure(backend, data, numel, quantiles)))
+        .collect::<Vec<_>>();
+    let baseline_mean = results
+        .iter()
+        .find(|(backend, _)| *backend == Backend::BASELINE)
+        .expect("the backend registry must contain its baseline")
+        .1
+        .mean_rank_error;
+    let best_mean = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.mean_rank_error)
+        .fold(f64::INFINITY, f64::min);
+    let best_max = results
+        .iter()
+        .map(|(_, accuracy)| accuracy.max_rank_error)
+        .fold(f64::INFINITY, f64::min);
+
+    for (backend, accuracy) in results {
+        let backend_name = format!("{backend:?}");
+        let ratio = accuracy.mean_rank_error / baseline_mean.max(f64::EPSILON);
+        let mean = bold(
+            format!("{:>15.8}", accuracy.mean_rank_error),
+            accuracy.mean_rank_error == best_mean,
+        );
+        let max = bold(
+            format!("{:>15.8}", accuracy.max_rank_error),
+            accuracy.max_rank_error == best_max,
+        );
+        let ratio = bold(
+            format!("{:>11.3}×", ratio),
+            accuracy.mean_rank_error == best_mean,
+        );
         println!(
-            "{name:<28}  {backend:<16?}  {:>15.8}  {:>15.8}  {:>9.3}  {:>11.3}×",
-            accuracy.mean_rank_error,
-            accuracy.max_rank_error,
+            "{name:<28}  {backend_name:<16}  {mean}  {max}  {:>9.3}  {ratio}",
             accuracy.worst_quantile,
-            accuracy.mean_rank_error / baseline.mean_rank_error.max(f64::EPSILON),
         );
     }
+    println!();
 }
 
 fn regular_reports() {
