@@ -1,7 +1,7 @@
-use monatq::{RankStore, RankStoreConfig, TensorDigest};
+use monatq::{RankKnot, RankKnotConfig, TensorDigest};
 
-fn digest(values: &[f32]) -> TensorDigest<f32, RankStore> {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[1]);
+fn digest(values: &[f32]) -> TensorDigest<f32, RankKnot> {
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     for &value in values {
         digest.update(&[value]);
     }
@@ -10,7 +10,7 @@ fn digest(values: &[f32]) -> TensorDigest<f32, RankStore> {
 
 #[test]
 fn layout_and_default_memory_accounting_are_exact() {
-    let digest = TensorDigest::<f32, RankStore>::new(&[17]);
+    let digest = TensorDigest::<f32, RankKnot>::new(&[17]);
     assert_eq!(digest.config().buffer_capacity, 256);
     assert_eq!(digest.state_bytes_per_position(), 400);
     assert_eq!(digest.state_memory_bytes(), 17 * 400);
@@ -20,7 +20,7 @@ fn layout_and_default_memory_accounting_are_exact() {
 
 #[test]
 fn empty_and_nan_queries_match_backend_conventions() {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[2]);
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[2]);
     assert_eq!(digest.quantile(0.5), vec![0.0, 0.0]);
     digest.update(&[1.0, 2.0]);
     assert!(digest.quantile(f32::NAN).iter().all(|value| value.is_nan()));
@@ -28,8 +28,8 @@ fn empty_and_nan_queries_match_backend_conventions() {
 
 #[test]
 fn partial_and_full_buffers_are_flushed_without_loss() {
-    let config = RankStoreConfig { buffer_capacity: 4 };
-    let mut digest = TensorDigest::<f32, RankStore>::with_config(&[2], config);
+    let config = RankKnotConfig { buffer_capacity: 4 };
+    let mut digest = TensorDigest::<f32, RankKnot>::with_config(&[2], config);
     for i in 0..11 {
         digest.update(&[i as f32, (100 + i) as f32]);
     }
@@ -54,7 +54,7 @@ fn endpoint_queries_use_exact_extrema_after_compression() {
 
 #[test]
 fn retained_ties_cover_their_interior_rank_interval() {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[1]);
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     for i in 0..2_000 {
         digest.update(&[if i < 1_200 { 7.0 } else { 10.0 + i as f32 }]);
     }
@@ -65,7 +65,7 @@ fn retained_ties_cover_their_interior_rank_interval() {
 
 #[test]
 fn quantile_curve_is_monotone() {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[1]);
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     let mut state = 0x1234_5678_u32;
     for _ in 0..20_000 {
         state ^= state << 13;
@@ -80,8 +80,8 @@ fn quantile_curve_is_monotone() {
 
 #[test]
 fn nan_rejects_the_whole_tensor_update_before_mutation() {
-    let config = RankStoreConfig { buffer_capacity: 8 };
-    let mut digest = TensorDigest::<f32, RankStore>::with_config(&[3], config);
+    let config = RankKnotConfig { buffer_capacity: 8 };
+    let mut digest = TensorDigest::<f32, RankKnot>::with_config(&[3], config);
     digest.update(&[1.0, 2.0, 3.0]);
     let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         digest.update(&[4.0, f32::NAN, 6.0]);
@@ -95,7 +95,7 @@ fn nan_rejects_the_whole_tensor_update_before_mutation() {
 
 #[test]
 fn infinities_remain_pure_and_do_not_poison_finite_estimates() {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[1]);
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     for i in 0..10_000 {
         let value = match i % 100 {
             0 => f32::NEG_INFINITY,
@@ -113,7 +113,7 @@ fn infinities_remain_pure_and_do_not_poison_finite_estimates() {
 
 #[test]
 fn signed_zero_extrema_and_ties_are_deterministic() {
-    let mut digest = TensorDigest::<f32, RankStore>::new(&[1]);
+    let mut digest = TensorDigest::<f32, RankKnot>::new(&[1]);
     for i in 0..1_000 {
         digest.update(&[if i % 2 == 0 { -0.0 } else { 0.0 }]);
     }
@@ -125,8 +125,8 @@ fn signed_zero_extrema_and_ties_are_deterministic() {
 
 #[test]
 fn constant_state_preserves_mass_and_value_across_many_flushes() {
-    let config = RankStoreConfig { buffer_capacity: 3 };
-    let mut digest = TensorDigest::<f32, RankStore>::with_config(&[1], config);
+    let config = RankKnotConfig { buffer_capacity: 3 };
+    let mut digest = TensorDigest::<f32, RankKnot>::with_config(&[1], config);
     for _ in 0..10_001 {
         digest.update(&[42.25]);
     }

@@ -1,6 +1,6 @@
-# RANKSTORE feasibility experiment
+# RankKnot feasibility experiment
 
-This directory contains the reproducible Python feasibility test for the RANKSTORE compact tensor-history backend proposed in `docs/rankstore-whitepaper.typ`.
+This directory contains the reproducible Python feasibility test for the RankKnot compact tensor-history backend proposed in `docs/rankknot-whitepaper.typ`.
 
 ## Run
 
@@ -14,11 +14,11 @@ Requirements: Python 3.11+, NumPy, and Cargo. The script creates the Rust baseli
 ## Compared layouts
 
 - **RTC-48-stream:** 48 `f32` locations with `u32` counts, streamed in 256-row batches.
-- **RTC-64-u16-stream / RANKSTORE:** 64 `f32` locations and 64 prefix-rounded `u16` probability masses in a 400-byte summary-state target layout. This figure excludes the batch input buffer and flush workspace.
+- **RTC-64-u16-stream / RankKnot:** 64 `f32` locations and 64 prefix-rounded `u16` probability masses in a 400-byte summary-state target layout. This figure excludes the batch input buffer and flush workspace.
 - **RTC-48-offline:** one-shot compression of the full empirical distribution; this is a representation upper bound, not a streaming algorithm.
 - Repository **TDigest** and **QuantileSpine**, run through `TensorDigest` on identical ordered `f32` values.
 
-The RANKSTORE paper additionally proposes exact `f32` minimum and maximum sidecars. They replace the per-cell count because the tensor sample count is shared by the parent `TensorDigest`. The current rank grid excludes probabilities zero and one, so these sidecars do not alter the reported interior results.
+The RankKnot paper additionally proposes exact `f32` minimum and maximum sidecars. They replace the per-cell count because the tensor sample count is shared by the parent `TensorDigest`. The current rank grid excludes probabilities zero and one, so these sidecars do not alter the reported interior results.
 
 ## Protocol
 

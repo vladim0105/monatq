@@ -18,7 +18,7 @@
   header: context {
     if counter(page).get().first() > 1 [
       #set text(size: 8pt, fill: muted)
-      RANKSTORE · compact tensor histories for deferred analysis
+      RankKnot · compact tensor histories for deferred analysis
       #h(1fr)
       Research note · version 0.3
     ]
@@ -120,7 +120,7 @@
 
 #let ptq-flow = cetz.canvas(length: 0.92cm, {
   import cetz.draw: *
-  let boxes = ((.2, "tensors"), (3.1, "observations"), (6.0, "update"), (8.9, "RANKSTORE"), (11.8, "cold analysis"))
+  let boxes = ((.2, "tensors"), (3.1, "observations"), (6.0, "update"), (8.9, "RankKnot"), (11.8, "cold analysis"))
   for item in boxes {
     let x = item.at(0)
     rect((x, .5), (x + 2.35, 1.7), radius: .12, fill: if x == 8.9 { orange.lighten(88%) } else { blue.lighten(91%) }, stroke: .8pt + if x == 8.9 { orange } else { blue })
@@ -326,14 +326,14 @@
     rect((1.95, y + .08), (1.95 + a * .65, y + .34), fill: orange, stroke: none)
     rect((1.95, y - .25), (1.95 + b * .65, y + .01), fill: blue, stroke: none)
   }
-  content((7.4, .45), text(size: 7pt, fill: orange)[RANKSTORE])
+  content((7.4, .45), text(size: 7pt, fill: orange)[RankKnot])
   content((8.7, .45), text(size: 7pt, fill: blue)[t-digest])
   content((5.7, 3.75), text(size: 7pt, fill: muted)[mean rank error × 10³])
 })
 
 #align(center)[
   #v(0.20in)
-  #text(size: 33pt, weight: "bold", fill: navy)[RANKSTORE]
+  #text(size: 33pt, weight: "bold", fill: navy)[RankKnot]
   #v(0.10in)
   #text(size: 17pt, weight: "bold")[A 400-Byte Persistent Rank Summary]
   #text(size: 17pt, weight: "bold")[for Deferred Tensor Analysis]
@@ -354,7 +354,7 @@
 #callout([The proposal], [Replace the current per-position t-digest with one deterministic weighted approximation of the empirical tensor history. Sixty-four value knots, 16-bit probability masses, one tie mask, and exact extrema occupy 400 bytes of summary state per position. The live collector also needs an input buffer and bounded flush workspace. Collection commits to no percentile, grouping, visualization, or quantizer; those decisions remain cold and revisable.], tone: orange)
 
 #v(0.12in)
-#callout([An important wording distinction], [RANKSTORE *ingests every observation*, but it does not retain every raw value. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples cannot be reconstructed or replayed.], tone: red)
+#callout([An important wording distinction], [RankKnot *ingests every observation*, but it does not retain every raw value. It preserves an approximate empirical distribution from which later rank-based decisions can be made. Raw samples cannot be reconstructed or replayed.], tone: red)
 
 #pagebreak()
 #outline(title: [Contents], depth: 2, indent: auto)
@@ -363,7 +363,7 @@
 
 `TensorDigest` receives a sequence of full tensor samples and tracks one distribution at every flat tensor position. The expensive part is not an individual value; it is the product of positions, samples, and persistent bytes. At collection time, callers often do not yet know which summaries they will need. They may later ask for robust ranges, percentiles, per-channel groups, visualizations, outlier diagnostics, or post-training quantization (PTQ) thresholds.
 
-RANKSTORE separates *observation* from *decision*. During collection it maintains a compact positive approximation of each position’s empirical distribution. During a cold later stage it can answer quantiles, combine arbitrary positions into groups, evaluate range policies, or serve as input to a quantizer. Query and aggregation latency are explicitly secondary; update throughput and memory dominate.
+RankKnot separates *observation* from *decision*. During collection it maintains a compact positive approximation of each position’s empirical distribution. During a cold later stage it can answer quantiles, combine arbitrary positions into groups, evaluate range policies, or serve as input to a quantizer. Query and aggregation latency are explicitly secondary; update throughput and memory dominate.
 
 #figure(ptq-flow, caption: [The intended scope. Every tensor observation updates the same compact state. Later consumers can choose their own grouping and decision policy without replaying the tensor stream.])
 
@@ -374,7 +374,7 @@ The proposed summary state uses 400 bytes per tensor position—roughly one twel
 #table(
   columns: (1.55fr, 1fr, 1fr, 1fr),
   align: (left, center, center, center),
-  table.header([*Property*], [*t-digest*], [*Quantile Spine*], [*RANKSTORE*]),
+  table.header([*Property*], [*t-digest*], [*Quantile Spine*], [*RankKnot*]),
   [Summary state/position], [4,900 B], [368 B], [400 B],
   [`f32` input buffer/position], [800 B], [1,024 B], [1,024 B],
   [Full sort buffer/position], [none], [1,024 B], [none proposed],
@@ -386,9 +386,9 @@ The proposed summary state uses 400 bytes per tensor position—roughly one twel
   [Cold group merge], [centroid merge], [not available], [union + same rebin],
 )
 
-The table assumes default configurations, `f32`, a 64-bit target, and large tensors over which object headers and worker-local scratch amortize. The implemented t-digest and Quantile Spine live totals are verified from allocator-instrumented `backend_accuracy` runs rather than field-size estimates; the unimplemented RANKSTORE total remains a design projection. RANKSTORE’s 1,424-byte live estimate requires gathering and sorting into per-worker scratch rather than materializing a second tensor-sized buffer. Adding such a buffer would raise it to 2,448 bytes, slightly above the current Quantile Spine total. Conversely, Quantile Spine could adopt the same worker-local strategy and reach about 1,392 bytes. The live-memory difference between those two designs is therefore an implementation choice, not an inherent RANKSTORE advantage.
+The table assumes default configurations, `f32`, a 64-bit target, and large tensors over which object headers and worker-local scratch amortize. The implemented t-digest, Quantile Spine, and RankKnot live totals are verified from allocator-instrumented `backend_accuracy` runs rather than field-size estimates. RankKnot’s 1,424-byte tensor-scaled live total uses gathering and sorting in per-worker scratch rather than materializing a second tensor-sized buffer. Adding such a buffer would raise it to 2,448 bytes, slightly above the current Quantile Spine total. Conversely, Quantile Spine could adopt the same worker-local strategy and reach about 1,392 bytes. The live-memory difference between those two designs is therefore an implementation choice, not an inherent RankKnot advantage.
 
-#callout([Evidence status], [Held-out Python experiments show better aggregate rank accuracy than the repository t-digest on smooth, atomic, quantized, and bimodal workloads. The 16-bit state transition and `f32` representatives are simulated. Rust throughput, exact live allocation, million-row drift, and downstream application quality remain unmeasured.], tone: green)
+#callout([Evidence status], [Held-out Python experiments show better aggregate rank accuracy than the repository t-digest on smooth, atomic, quantized, and bimodal workloads. The 16-bit state transition and `f32` representatives are simulated. Rust throughput, million-row drift, and downstream application quality remain unmeasured.], tone: green)
 
 = Observe now, decide later
 
@@ -396,7 +396,7 @@ The table assumes default configurations, `f32`, a 64-bit target, and large tens
 
 A minimum and maximum preserve endpoints but reveal nothing about how probability is distributed between them. A fixed histogram commits to bin edges before the eventual query is known. A single percentile commits to one tail policy. A preselected channel grouping prevents later comparison with per-tensor or hardware-aligned alternatives.
 
-RANKSTORE instead records a reusable approximation of rank mass. The same collected state can support several later consumers:
+RankKnot instead records a reusable approximation of rank mass. The same collected state can support several later consumers:
 
 - median, percentile bands, and robust ranges;
 - per-position, per-channel, per-token, or whole-tensor aggregation;
@@ -409,13 +409,13 @@ The architecture is therefore closer to a compact tensor history than to a quant
 
 == What cannot be deferred
 
-No fixed-memory summary retains raw sample identity, temporal order, correlations between positions, or exact arbitrary quantiles. If a later analysis needs sample-level replay, covariance, or causality, it must store different information. Comparison-based quantile sketches necessarily trade memory for error @karnin2016. RANKSTORE targets representative tensor distributions rather than a universal worst-case guarantee.
+No fixed-memory summary retains raw sample identity, temporal order, correlations between positions, or exact arbitrary quantiles. If a later analysis needs sample-level replay, covariance, or causality, it must store different information. Comparison-based quantile sketches necessarily trade memory for error @karnin2016. RankKnot targets representative tensor distributions rather than a universal worst-case guarantee.
 
 = A compact empirical distribution
 
 == Positive weighted support
 
-An observed stream defines an empirical distribution made of point masses. RANKSTORE replaces that large measure with at most 64 positive weighted locations. In one dimension, this can be understood as moving nearby rank mass onto representative support points—a small transport coreset @peyre2019.
+An observed stream defines an empirical distribution made of point masses. RankKnot replaces that large measure with at most 64 positive weighted locations. In one dimension, this can be understood as moving nearby rank mass onto representative support points—a small transport coreset @peyre2019.
 
 #intuition(
   [The compressed history],
@@ -469,7 +469,7 @@ The hot path uses bounded arrays over roughly 320 sorted entries. This scratch s
 
 == Tail-companded rank cells
 
-Uniform rank cells spend the same resolution at the median and at the extremes. Many later decisions—robust ranges, alarms, saturation estimates, and quantization—care about tails. RANKSTORE therefore places fixed slots uniformly in an abstract coordinate that bends toward probability zero and one.
+Uniform rank cells spend the same resolution at the median and at the extremes. Many later decisions—robust ranges, alarms, saturation estimates, and quantization—care about tails. RankKnot therefore places fixed slots uniformly in an abstract coordinate that bends toward probability zero and one.
 
 #intuition(
   [Tail-aware rank placement],
@@ -547,7 +547,7 @@ Aggregation latency is intentionally not a performance requirement. Cold merges 
 
 = Example consumer: post-training quantization
 
-PTQ illustrates why deferred distribution storage is useful. A calibration run can collect activation histories before choosing bit width, symmetric versus asymmetric ranges, per-tensor versus per-channel grouping, or clipping policy. The same RANKSTORE state can compare those choices later. PTQ methods commonly use a small representative set to establish activation ranges @hubara2021 @nagel2021.
+PTQ illustrates why deferred distribution storage is useful. A calibration run can collect activation histories before choosing bit width, symmetric versus asymmetric ranges, per-tensor versus per-channel grouping, or clipping policy. The same RankKnot state can compare those choices later. PTQ methods commonly use a small representative set to establish activation ranges @hubara2021 @nagel2021.
 
 == Evaluate an affine quantizer
 
@@ -599,7 +599,7 @@ Workloads include uniform, normal, two lognormal scales, Student-t, shuffled and
 #table(
   columns: (1.35fr, .9fr, .9fr, .9fr, .9fr),
   align: (left, right, right, right, right),
-  table.header([*Workload*], [*RANKSTORE mean*], [*t-digest mean*], [*RANKSTORE max*], [*t-digest max*]),
+  table.header([*Workload*], [*RankKnot mean*], [*t-digest mean*], [*RankKnot max*], [*t-digest max*]),
   [uniform], [0.000267], [0.001414], [0.001150], [0.005179],
   [normal], [0.000271], [0.001018], [0.001069], [0.005746],
   [lognormal, σ=1], [0.000346], [0.002420], [0.001304], [0.008954],
@@ -611,7 +611,7 @@ Workloads include uniform, normal, two lognormal scales, Student-t, shuffled and
 
 #figure(bars-art, caption: [Mean valid-rank error on selected held-out workloads. Bars use thousandths of rank. Lower is better; separated modes remain harder than smooth distributions.])
 
-Across all 36 workload/seed pairs, RANKSTORE’s mean-of-means was 0.000330 and its worst observed maximum was 0.016979. The repository t-digest values were 0.006928 and 0.246068. RANKSTORE had lower mean and maximum error on every nonconstant pair; both methods tied on constants.
+Across all 36 workload/seed pairs, RankKnot’s mean-of-means was 0.000330 and its worst observed maximum was 0.016979. The repository t-digest values were 0.006928 and 0.246068. RankKnot had lower mean and maximum error on every nonconstant pair; both methods tied on constants.
 
 == Discrete observations
 
@@ -633,7 +633,7 @@ Zero means zero at the 235 tested ranks, not equality at every possible probabil
 
 == Important caveats
 
-- *Extreme tails:* t-digest was often two to three times more accurate at individual smooth tail queries, although RANKSTORE’s absolute tail errors were small. The worst observed tail error was 0.001719.
+- *Extreme tails:* t-digest was often two to three times more accurate at individual smooth tail queries, although RankKnot’s absolute tail errors were small. The worst observed tail error was 0.001719.
 - *Separated modes:* linear interpolation across a large gap remains the largest ordinary-distribution error.
 - *Extrema:* the experiment’s interior state did not include endpoint requests. Proposed min/max sidecars make endpoints exact by construction without changing reported interior estimates.
 - *No speed evidence:* Python runtime is not a proxy for Rust tensor throughput.
@@ -645,7 +645,7 @@ Zero means zero at the 235 tested ranks, not equality at every possible probabil
 
 ```rust
 #[repr(C)]
-struct RankStore {
+struct RankKnot {
     values: [f32; 64],
     masses: [u16; 64],
     pure_mask: u64,
@@ -714,7 +714,7 @@ The consumer study should use the same collected state to compare several polici
 - *Working memory:* the 400-byte title names summary state only. The default input buffer raises proposed live tensor-scaled storage to 1,424 bytes per `f32` position, and a full sorted copy would raise it to 2,448 bytes.
 - *Fixed memory:* no 400-byte summary state offers tiny distribution-free error for every stream.
 
-#callout([The design principle], [Collection should preserve a useful approximation of the observed distribution while making as few downstream choices as possible. RANKSTORE spends its state budget on rank mass, ties, and extrema; everything else is deferred.], tone: green)
+#callout([The design principle], [Collection should preserve a useful approximation of the observed distribution while making as few downstream choices as possible. RankKnot spends its state budget on rank mass, ties, and extrema; everything else is deferred.], tone: green)
 
 = Reproducibility
 
@@ -729,8 +729,8 @@ The next artifact should record real tensor shapes, sample counts, throughput, s
 
 = Conclusion
 
-RANKSTORE is a compact tensor-history backend, not a quantizer. It ingests every observation into a 400-byte positive summary state, preserves retained ties and exact extrema, and allows quantiles, grouping, visualization, clipping, and quantization policies to be chosen later. In the current feasibility suite it improves broad rank accuracy and discrete behavior over the repository t-digest. Apples-to-apples, its summary state is about one twelfth of the default t-digest state; its proposed one-buffer live tensor-scaled allocation is about one quarter of the current t-digest allocation. Its summary state is 32 bytes larger than Quantile Spine’s, so any live-memory advantage over that backend depends on avoiding Quantile Spine’s tensor-sized sort buffer.
+RankKnot is a compact tensor-history backend, not a quantizer. It ingests every observation into a 400-byte positive summary state, preserves retained ties and exact extrema, and allows quantiles, grouping, visualization, clipping, and quantization policies to be chosen later. In the current feasibility suite it improves broad rank accuracy and discrete behavior over the repository t-digest. Apples-to-apples, its summary state is about one twelfth of the default t-digest state; its proposed one-buffer live tensor-scaled allocation is about one quarter of the current t-digest allocation. Its summary state is 32 bytes larger than Quantile Spine’s, so any live-memory advantage over that backend depends on avoiding Quantile Spine’s tensor-sized sort buffer.
 
-The remaining questions are operational: Rust throughput and exact live allocation, long-stream mass drift, cold-merge fidelity, and whether real deferred consumers make decisions as good as or better than those based on t-digest. Those tests should decide the backend before its public API is stabilized.
+The remaining questions are operational: Rust throughput, long-stream mass drift, cold-merge fidelity, and whether real deferred consumers make decisions as good as or better than those based on t-digest. Those tests should decide the backend before its public API is stabilized.
 
 #bibliography("references.bib", title: [References])

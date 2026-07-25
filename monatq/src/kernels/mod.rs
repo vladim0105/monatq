@@ -1,5 +1,5 @@
 pub(crate) mod quantile_spine;
-pub(crate) mod rankstore;
+pub(crate) mod rankknot;
 pub(crate) mod tdigest;
 
 use crate::{TensorValue, tensor_digest::StorageOperations};
@@ -12,18 +12,18 @@ pub struct TDigest;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QuantileSpine;
 
-/// Marker selecting the f32-only RANKSTORE kernel.
+/// Marker selecting the f32-only RankKnot kernel.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RankStore;
+pub struct RankKnot;
 
-/// Configuration for the f32-only RANKSTORE kernel.
+/// Configuration for the f32-only RankKnot kernel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RankStoreConfig {
+pub struct RankKnotConfig {
     /// Number of complete tensor samples buffered before parallel compression.
     pub buffer_capacity: usize,
 }
 
-impl Default for RankStoreConfig {
+impl Default for RankKnotConfig {
     fn default() -> Self {
         Self {
             buffer_capacity: 256,

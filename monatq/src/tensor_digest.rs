@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     TensorValue,
-    kernels::{self, DigestKernel, QuantileSpine, RankStore, TDigest},
+    kernels::{self, DigestKernel, QuantileSpine, RankKnot, TDigest},
 };
 
 /// Operations shared by every kernel-specific storage layout.
@@ -160,14 +160,14 @@ impl<T: TensorValue> TensorDigest<T, TDigest> {
     }
 }
 
-impl TensorDigest<f32, RankStore> {
+impl TensorDigest<f32, RankKnot> {
     /// Number of accepted samples, including samples flushed for this query.
     pub fn sample_count(&mut self) -> u64 {
         self.flush();
         self.storage.sample_count()
     }
 
-    pub fn config(&self) -> &crate::RankStoreConfig {
+    pub fn config(&self) -> &crate::RankKnotConfig {
         self.storage.config()
     }
 

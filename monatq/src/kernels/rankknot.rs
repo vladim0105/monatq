@@ -2,29 +2,29 @@ use rayon::prelude::*;
 use std::mem::size_of;
 
 use crate::{
-    kernels::{DigestKernel, RankStore, RankStoreConfig, sealed},
+    kernels::{DigestKernel, RankKnot, RankKnotConfig, sealed},
     tensor_digest::StorageOperations,
 };
 
-pub const RANKSTORE_K: usize = 64;
+pub const RANK_KNOT_K: usize = 64;
 const MASS_QUANTA: u64 = u16::MAX as u64;
 
 /// The complete persistent summary for one tensor position.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(crate) struct RankStoreState {
-    values: [f32; RANKSTORE_K],
-    masses: [u16; RANKSTORE_K],
+pub(crate) struct RankKnotState {
+    values: [f32; RANK_KNOT_K],
+    masses: [u16; RANK_KNOT_K],
     pure_mask: u64,
     min: f32,
     max: f32,
 }
 
-impl Default for RankStoreState {
+impl Default for RankKnotState {
     fn default() -> Self {
         Self {
-            values: [0.0; RANKSTORE_K],
-            masses: [0; RANKSTORE_K],
+            values: [0.0; RANK_KNOT_K],
+            masses: [0; RANK_KNOT_K],
             pure_mask: 0,
             min: f32::INFINITY,
             max: f32::NEG_INFINITY,
@@ -32,7 +32,7 @@ impl Default for RankStoreState {
     }
 }
 
-const _: () = assert!(size_of::<RankStoreState>() == 400);
+const _: () = assert!(size_of::<RankKnotState>() == 400);
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -41,18 +41,18 @@ struct Entry {
     pure: bool,
 }
 
-pub(crate) struct RankStoreStorage {
+pub(crate) struct RankKnotStorage {
     shape: Vec<usize>,
     numel: usize,
-    config: RankStoreConfig,
+    config: RankKnotConfig,
     row_buffer: Vec<f32>,
     n_buffered: usize,
     sample_count: u64,
-    states: Vec<RankStoreState>,
+    states: Vec<RankKnotState>,
 }
 
-impl RankStoreStorage {
-    pub(crate) fn with_config(shape: &[usize], config: RankStoreConfig) -> Self {
+impl RankKnotStorage {
+    pub(crate) fn with_config(shape: &[usize], config: RankKnotConfig) -> Self {
         assert!(
             config.buffer_capacity > 0,
             "buffer_capacity must be positive"
@@ -68,7 +68,7 @@ impl RankStoreStorage {
             row_buffer: vec![0.0; buffer_len],
             n_buffered: 0,
             sample_count: 0,
-            states: vec![RankStoreState::default(); numel],
+            states: vec![RankKnotState::default(); numel],
         }
     }
 
@@ -76,7 +76,7 @@ impl RankStoreStorage {
         self.sample_count
     }
 
-    pub(crate) fn config(&self) -> &RankStoreConfig {
+    pub(crate) fn config(&self) -> &RankKnotConfig {
         &self.config
     }
 
@@ -101,11 +101,11 @@ impl RankStoreStorage {
     }
 
     pub(crate) fn state_memory_bytes(&self) -> usize {
-        self.states.capacity() * size_of::<RankStoreState>()
+        self.states.capacity() * size_of::<RankKnotState>()
     }
 
     pub(crate) const fn state_bytes_per_position(&self) -> usize {
-        size_of::<RankStoreState>()
+        size_of::<RankKnotState>()
     }
 
     pub(crate) fn buffer_memory_bytes(&self) -> usize {
@@ -119,19 +119,19 @@ impl RankStoreStorage {
     }
 }
 
-impl sealed::Kernel<f32> for RankStore {
-    type Storage = RankStoreStorage;
+impl sealed::Kernel<f32> for RankKnot {
+    type Storage = RankKnotStorage;
 
-    fn create_storage(shape: &[usize], config: RankStoreConfig) -> Self::Storage {
-        RankStoreStorage::with_config(shape, config)
+    fn create_storage(shape: &[usize], config: RankKnotConfig) -> Self::Storage {
+        RankKnotStorage::with_config(shape, config)
     }
 }
 
-impl DigestKernel<f32> for RankStore {
-    type Config = RankStoreConfig;
+impl DigestKernel<f32> for RankKnot {
+    type Config = RankKnotConfig;
 }
 
-impl StorageOperations<f32> for RankStoreStorage {
+impl StorageOperations<f32> for RankKnotStorage {
     fn numel(&self) -> usize {
         self.numel
     }
@@ -149,7 +149,7 @@ impl StorageOperations<f32> for RankStoreStorage {
         assert_eq!(data.len(), self.numel, "tensor sample has the wrong length");
         assert!(
             !data.iter().any(|value| value.is_nan()),
-            "RANKSTORE rejects tensor updates containing NaN"
+            "RankKnot rejects tensor updates containing NaN"
         );
         if self.n_buffered == self.config.buffer_capacity {
             self.flush();
@@ -171,7 +171,7 @@ impl StorageOperations<f32> for RankStoreStorage {
         let old_count = self.sample_count;
         let buffer = &self.row_buffer[..rows * numel];
         self.states.par_iter_mut().enumerate().for_each_init(
-            || Vec::<Entry>::with_capacity(RANKSTORE_K + rows),
+            || Vec::<Entry>::with_capacity(RANK_KNOT_K + rows),
             |scratch, (position, state)| {
                 scratch.clear();
                 decode_old(state, old_count, scratch);
@@ -222,11 +222,11 @@ impl StorageOperations<f32> for RankStoreStorage {
     }
 }
 
-fn decode_old(state: &RankStoreState, old_count: u64, output: &mut Vec<Entry>) {
+fn decode_old(state: &RankKnotState, old_count: u64, output: &mut Vec<Entry>) {
     if old_count == 0 {
         return;
     }
-    for index in 0..RANKSTORE_K {
+    for index in 0..RANK_KNOT_K {
         let mass = state.masses[index];
         if mass == 0 {
             continue;
@@ -255,7 +255,7 @@ fn coalesce(entries: &mut Vec<Entry>) {
     entries.truncate(write);
 }
 
-fn compress_and_store(entries: &[Entry], state: &mut RankStoreState) {
+fn compress_and_store(entries: &[Entry], state: &mut RankKnotState) {
     let groups = groups(entries);
     let total = entries.iter().map(|entry| entry.weight).sum::<u64>();
     let mut representatives = Vec::with_capacity(groups.len());
@@ -285,10 +285,10 @@ fn compress_and_store(entries: &[Entry], state: &mut RankStoreState) {
     // fixed knot budget is not wasted and a mixed representative never becomes pure.
     coalesce(&mut representatives);
 
-    *state = RankStoreState {
+    *state = RankKnotState {
         min: state.min,
         max: state.max,
-        ..RankStoreState::default()
+        ..RankKnotState::default()
     };
     let mut cumulative = 0_u64;
     let mut previous_prefix = 0_u64;
@@ -311,7 +311,7 @@ fn compress_and_store(entries: &[Entry], state: &mut RankStoreState) {
 }
 
 fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
-    if entries.len() <= RANKSTORE_K {
+    if entries.len() <= RANK_KNOT_K {
         return (0..entries.len()).map(|index| (index, index + 1)).collect();
     }
     let total = entries.iter().map(|entry| entry.weight).sum::<u64>();
@@ -320,7 +320,7 @@ fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
     for entry in entries {
         prefix.push(prefix.last().copied().unwrap().saturating_add(entry.weight));
     }
-    let mut boundaries = Vec::with_capacity(RANKSTORE_K - 1);
+    let mut boundaries = Vec::with_capacity(RANK_KNOT_K - 1);
     // Reserve cuts for infinities first: they are indivisible pure singleton groups and
     // must never enter a mean, even when an arcsine target does not land near them.
     if entries
@@ -335,8 +335,8 @@ fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
     {
         boundaries.push(entries.len() - 1);
     }
-    for cut in 1..RANKSTORE_K {
-        let q = ((std::f64::consts::PI * cut as f64 / (2.0 * RANKSTORE_K as f64)).sin()).powi(2);
+    for cut in 1..RANK_KNOT_K {
+        let q = ((std::f64::consts::PI * cut as f64 / (2.0 * RANK_KNOT_K as f64)).sin()).powi(2);
         let target = q * total as f64;
         let index = prefix[1..].partition_point(|&mass| (mass as f64) < target);
         let before = prefix[index] as f64;
@@ -349,13 +349,13 @@ fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
         if boundary > 0
             && boundary < entries.len()
             && !boundaries.contains(&boundary)
-            && boundaries.len() < RANKSTORE_K - 1
+            && boundaries.len() < RANK_KNOT_K - 1
         {
             boundaries.push(boundary);
         }
     }
     boundaries.sort_unstable();
-    let mut result = Vec::with_capacity(RANKSTORE_K);
+    let mut result = Vec::with_capacity(RANK_KNOT_K);
     let mut start = 0;
     for boundary in boundaries {
         result.push((start, boundary));
@@ -363,7 +363,7 @@ fn groups(entries: &[Entry]) -> Vec<(usize, usize)> {
     }
     result.push((start, entries.len()));
 
-    while result.len() < RANKSTORE_K {
+    while result.len() < RANK_KNOT_K {
         let mut best: Option<(f64, usize, usize)> = None;
         for (group_index, &(left_index, right_index)) in result.iter().enumerate() {
             if right_index - left_index <= 1 {
@@ -420,7 +420,7 @@ fn round_ratio_ties_even(numerator: u64, multiplier: u64, denominator: u64) -> u
     rounded as u64
 }
 
-fn query(state: &RankStoreState, q: f32) -> f32 {
+fn query(state: &RankKnotState, q: f32) -> f32 {
     if state.masses[0] == 0 {
         return 0.0;
     }
@@ -436,7 +436,7 @@ fn query(state: &RankStoreState, q: f32) -> f32 {
     let target = q as f64;
     let total = MASS_QUANTA as f64;
     let mut cumulative = 0_u64;
-    for index in 0..RANKSTORE_K {
+    for index in 0..RANK_KNOT_K {
         let mass = u64::from(state.masses[index]);
         if mass == 0 {
             continue;
@@ -453,7 +453,7 @@ fn query(state: &RankStoreState, q: f32) -> f32 {
     let mut previous_rank = 0.0_f64;
     let mut previous_value = state.values[first];
     cumulative = 0;
-    for index in 0..RANKSTORE_K {
+    for index in 0..RANK_KNOT_K {
         let mass = u64::from(state.masses[index]);
         if mass == 0 {
             continue;
@@ -487,7 +487,7 @@ fn query(state: &RankStoreState, q: f32) -> f32 {
     )
 }
 
-fn first_active_from_end(state: &RankStoreState) -> usize {
+fn first_active_from_end(state: &RankKnotState) -> usize {
     state.masses.iter().rposition(|&mass| mass != 0).unwrap()
 }
 
@@ -527,8 +527,8 @@ mod tests {
 
     #[test]
     fn persistent_state_is_exactly_400_bytes() {
-        assert_eq!(size_of::<RankStoreState>(), 400);
-        assert_eq!(std::mem::align_of::<RankStoreState>(), 8);
+        assert_eq!(size_of::<RankKnotState>(), 400);
+        assert_eq!(std::mem::align_of::<RankKnotState>(), 8);
     }
 
     #[test]
@@ -539,9 +539,9 @@ mod tests {
 
     #[test]
     fn encoded_state_invariants_hold() {
-        let mut storage = RankStoreStorage::with_config(
+        let mut storage = RankKnotStorage::with_config(
             &[1],
-            RankStoreConfig {
+            RankKnotConfig {
                 buffer_capacity: 17,
             },
         );
@@ -564,7 +564,7 @@ mod tests {
                 .sum::<u64>(),
             MASS_QUANTA
         );
-        let active = (0..RANKSTORE_K)
+        let active = (0..RANK_KNOT_K)
             .filter(|&index| state.masses[index] != 0)
             .collect::<Vec<_>>();
         assert!(active.windows(2).all(|pair| {
