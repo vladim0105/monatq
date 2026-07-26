@@ -45,6 +45,27 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 let distributions = digest.analyze()?;
 ```
 
+### Why RankKnot is the default
+
+RankKnot is a compact streaming rank summary designed for tensors with many independently
+tracked positions. For each position it retains at most 32 weighted `f32` knots, 16-bit
+probability masses, a mask for retained exact repeated-value intervals, and exact minimum
+and maximum sidecars. This summary state occupies **208 bytes per position**, compared with
+approximately **4,900 bytes** for the default TDigest configuration. Updates are buffered in
+256-row batches and positions are compressed independently in parallel with Rayon.
+
+In the initial ten-workload accuracy suite, RankKnot had lower mean and maximum rank error
+than TDigest on nine workloads; TDigest won the 95%-zero activation case. A local Apple M4
+run measured about 78% less retained heap and 81% less peak heap for RankKnot. Tensor-wide
+RankKnot merges had lower mean and maximum error than TDigest on all ten representative
+workloads.
+
+These are initial results, not universal guarantees: adversarial workloads have mixed
+winners, and throughput depends on tensor shape and platform. See the
+[RankKnot algorithm specification](https://github.com/vladim0105/monatq/blob/master/docs/rankknot.md)
+for the algorithm, invariants, complexity, complete initial results, reproduction commands,
+and limitations.
+
 Select Quantile Spine without runtime dispatch:
 
 ```rust
