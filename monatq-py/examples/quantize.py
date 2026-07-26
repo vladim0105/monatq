@@ -112,7 +112,9 @@ class MonatqObserver(_ObserverBase):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_cpu = x.detach().cpu().float().contiguous().view(-1)
         if self._digest is None:
-            self._digest = TensorDigest([x_cpu.numel()], compression=100)
+            self._digest = TensorDigest(
+                [x_cpu.numel()], kernel="tdigest", compression=100
+            )
         self._digest.update(x_cpu)
         return x
 

@@ -1,10 +1,10 @@
 use monatq::TensorDigest;
 use statrs::distribution::{ContinuousCDF, Normal, Uniform};
 
-fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32> {
-    let mut td = TensorDigest::<f32>::new(&[1], 100);
+fn make_digest(values: impl IntoIterator<Item = f32>) -> TensorDigest<f32, monatq::TDigest> {
+    let mut td = TensorDigest::<f32, monatq::TDigest>::new(&[1]);
     for v in values {
-        td.update(&[v]);
+        td.update(&[v]).unwrap();
     }
     td
 }
@@ -166,14 +166,14 @@ fn cell_quantiles_consistent() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[3], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[3]);
     for &v in &vals {
-        td.update(&[v, v * 0.5, -v]);
+        td.update(&[v, v * 0.5, -v]).unwrap();
     }
 
     let qs = [0.25f32, 0.5, 0.75];
     td.flush();
-    let cell = td.cell_quantiles(2, &qs);
+    let cell = td.cell_quantiles(2, &qs).unwrap();
     for (i, &q) in qs.iter().enumerate() {
         let expected = td.quantile(q)[2];
         assert_eq!(
@@ -189,15 +189,15 @@ fn merge_cells_combines_selected_distributions() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[3], 100);
-    let mut expected = TensorDigest::new(&[1], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[3]);
+    let mut expected = TensorDigest::<_, monatq::TDigest>::new(&[1]);
     for &v in &vals {
-        td.update(&[v, v * 0.5, -v]);
-        expected.update(&[v]);
-        expected.update(&[-v]);
+        td.update(&[v, v * 0.5, -v]).unwrap();
+        expected.update(&[v]).unwrap();
+        expected.update(&[-v]).unwrap();
     }
 
-    let mut merged = td.merge_cells(&[0, 2]);
+    let mut merged = td.merge_cells(&[0, 2]).unwrap();
     for &q in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
         let got = merged.quantile(q)[0];
         let want = expected.quantile(q)[0];
@@ -211,10 +211,10 @@ fn merge_cells_combines_selected_distributions() {
 
 #[test]
 fn merge_cells_empty_selection_returns_empty_digest() {
-    let mut td = TensorDigest::new(&[2], 100);
-    td.update(&[1.0, 2.0]);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2]);
+    td.update(&[1.0, 2.0]).unwrap();
 
-    let mut merged = td.merge_cells(&[]);
+    let mut merged = td.merge_cells(&[]).unwrap();
     assert_eq!(merged.shape(), &[1]);
     assert_eq!(merged.numel(), 1);
     assert_eq!(merged.quantile(0.5)[0], 0.0);
@@ -224,21 +224,21 @@ fn merge_cells_empty_selection_returns_empty_digest() {
 fn merge_cells_all_tensor_elements_matches_expected_for_large_tensor() {
     let shape = [1, 5, 64, 64];
     let numel: usize = shape.iter().product();
-    let mut td = TensorDigest::new(&shape, 100);
-    let mut expected = TensorDigest::new(&[1], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&shape);
+    let mut expected = TensorDigest::<_, monatq::TDigest>::new(&[1]);
 
     for sample_idx in 0..256usize {
         let mut frame = vec![0.0f32; numel];
         for (cell_idx, value) in frame.iter_mut().enumerate() {
             let v = sample_idx as f32 * 0.25 + cell_idx as f32 / numel as f32;
             *value = v;
-            expected.update(&[v]);
+            expected.update(&[v]).unwrap();
         }
-        td.update(&frame);
+        td.update(&frame).unwrap();
     }
 
     let indices: Vec<usize> = (0..numel).collect();
-    let mut merged = td.merge_cells(&indices);
+    let mut merged = td.merge_cells(&indices).unwrap();
 
     for &q in &[0.1f32, 0.25, 0.5, 0.75, 0.9] {
         let got = merged.quantile(q)[0];
@@ -252,10 +252,45 @@ fn merge_cells_all_tensor_elements_matches_expected_for_large_tensor() {
 }
 
 #[test]
-#[should_panic]
-fn update_wrong_length_panics() {
-    let mut td = TensorDigest::new(&[1], 100);
-    td.update(&[1.0, 2.0]);
+fn update_wrong_length_is_rejected_without_touching_the_digest() {
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[1]);
+    td.update(&[1.0f32]).unwrap();
+
+    let error = td
+        .update(&[1.0, 2.0])
+        .expect_err("wrong length must be rejected");
+    assert!(
+        matches!(
+            error,
+            monatq::Error::ShapeMismatch {
+                expected: 1,
+                actual: 2
+            }
+        ),
+        "unexpected error: {error}"
+    );
+
+    // The rejected sample must not have been recorded. total_weight counts flushed weight,
+    // so flush first to see the accepted sample.
+    td.flush();
+    assert_eq!(td.total_weight(0).unwrap(), 1);
+}
+
+#[test]
+fn out_of_bounds_positions_are_rejected() {
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2]);
+    td.update(&[1.0f32, 2.0]).unwrap();
+
+    for error in [
+        td.total_weight(2).unwrap_err(),
+        td.cell_quantiles(2, &[0.5]).unwrap_err(),
+        td.merge_cells(&[0, 5]).unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, monatq::Error::IndexOutOfBounds { numel: 2, .. }),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -272,13 +307,13 @@ fn multi_dim_shape() {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let vals = samples(&dist, 2000);
 
-    let mut td = TensorDigest::new(&[2, 3], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2, 3]);
     assert_eq!(td.numel(), 6);
     assert_eq!(td.shape(), &[2, 3]);
 
     for chunk in vals.chunks(6) {
         let row: Vec<f32> = (0..6).map(|i| chunk[i % chunk.len()]).collect();
-        td.update(&row);
+        td.update(&row).unwrap();
     }
 
     let medians = td.quantile(0.5);
@@ -291,21 +326,21 @@ fn multi_dim_shape() {
 fn merge_all_cells_large() {
     let shape = [5usize, 5, 128, 128];
     let numel: usize = shape.iter().product();
-    let mut td = TensorDigest::new(&shape, 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&shape);
     for s in 0..2000usize {
         let frame: Vec<f32> = (0..numel).map(|i| (s * numel + i) as f32 * 0.001).collect();
-        td.update(&frame);
+        td.update(&frame).unwrap();
     }
     let indices: Vec<usize> = (0..numel).collect();
-    let _merged = td.merge_cells(&indices);
+    let _merged = td.merge_cells(&indices).unwrap();
 }
 
 #[test]
 fn i32_quantile_accuracy() {
-    // Verify that TensorDigest<i32> correctly estimates quantiles for integer input.
-    let mut d = TensorDigest::<i32>::new(&[1], 100);
+    // Verify that TensorDigest<i32, monatq::TDigest> correctly estimates quantiles for integer input.
+    let mut d = TensorDigest::<i32, monatq::TDigest>::new(&[1]);
     for i in 1..=1000_i32 {
-        d.update(&[i]);
+        d.update(&[i]).unwrap();
     }
     let q50 = d.quantile(0.5)[0];
     assert!((q50 - 500.0).abs() < 2.0, "i32 median {q50} not near 500");

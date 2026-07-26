@@ -5,30 +5,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::distribution::Distribution;
-use crate::tensor_digest::TensorDigest;
+use crate::tensor_digest::StorageOperations;
 use crate::tensor_value::TensorValue;
 
 static HTML: &str = include_str!("frontend.html");
 
 /// Start a blocking HTTP visualizer on `127.0.0.1:{MONATQ_PORT}` (default 7777).
 /// Calls `analyze()` internally before serving.
-pub(crate) fn serve<T: TensorValue>(digest: &mut TensorDigest<T>) -> std::io::Result<()> {
+///
+/// Generic over kernel storage rather than tied to one kernel: every endpoint is expressible
+/// in [`StorageOperations`], so any kernel implementing merge, analysis, and zero filtering
+/// is servable without a second copy of this module.
+pub(crate) fn serve<T: TensorValue, S: StorageOperations<T>>(digest: &mut S) -> crate::Result<()> {
     let stop = AtomicBool::new(false);
     serve_until(digest, &stop)
 }
 
-pub(crate) fn serve_until<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+pub(crate) fn serve_until<T: TensorValue, S: StorageOperations<T>>(
+    digest: &mut S,
     stop: &AtomicBool,
-) -> std::io::Result<()> {
+) -> crate::Result<()> {
     let port = std::env::var("MONATQ_PORT").unwrap_or_else(|_| "7777".to_string());
     let addr = format!("127.0.0.1:{port}");
 
-    let distributions = digest.analyze();
+    // Fail before binding the port if this kernel cannot analyse: reporting `Unsupported`
+    // immediately is far better than serving a window that errors on every request.
+    let distributions = digest.analyze()?;
     let shape = digest.shape().to_vec();
 
-    let listener = TcpListener::bind(&addr)?;
-    listener.set_nonblocking(true)?;
+    let listener = TcpListener::bind(&addr).map_err(crate::Error::Io)?;
+    listener.set_nonblocking(true).map_err(crate::Error::Io)?;
     eprintln!("monatq visualizer running at http://{addr}  (Ctrl+C to stop)");
 
     while !stop.load(Ordering::Relaxed) {
@@ -46,11 +52,11 @@ pub(crate) fn serve_until<T: TensorValue>(
 
 // ── request handling ─────────────────────────────────────────────────────────
 
-fn handle<T: TensorValue>(
+fn handle<T: TensorValue, S: StorageOperations<T>>(
     stream: &std::net::TcpStream,
     shape: &[usize],
     distributions: &[Distribution],
-    digest: &mut TensorDigest<T>,
+    digest: &mut S,
 ) {
     let (method, path, query, body_bytes) = match parse_http_request(stream) {
         Some(r) => r,
@@ -58,60 +64,78 @@ fn handle<T: TensorValue>(
     };
     let query = query.as_str();
 
-    let (status, ct, body): (&str, &str, String) = match path.as_str() {
-        "/" => ("200 OK", "text/html; charset=utf-8", HTML.to_string()),
-        "/api/info" => ("200 OK", "application/json", json_info(shape)),
+    // Endpoints that touch the digest are fallible, so each arm yields a `Result` and one
+    // place below turns a failure into a 500 rather than tearing down the server.
+    let routed: crate::Result<(&str, &str, String)> = match path.as_str() {
+        "/" => Ok(("200 OK", "text/html; charset=utf-8", HTML.to_string())),
+        "/api/info" => Ok(("200 OK", "application/json", json_info(shape))),
         "/api/slice" => {
             let q = parse_query(query);
-            let b = q.get("b").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            let c = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            (
-                "200 OK",
-                "application/json",
-                json_slice(shape, distributions, b, c),
-            )
+            match parse_coordinates(&q).and_then(|(b, c)| {
+                if shape.len() < 2 {
+                    Err("slice requires a tensor with at least 2 dimensions".to_string())
+                } else {
+                    channel_idx_checked(shape, b, c)
+                }
+            }) {
+                Ok(channel) => Ok((
+                    "200 OK",
+                    "application/json",
+                    json_slice(shape, distributions, channel),
+                )),
+                Err(message) => Ok(bad_request(message)),
+            }
         }
         "/api/cell" => {
             let q = parse_query(query);
             let idx = q.get("idx").and_then(|v| v.parse().ok()).unwrap_or(0usize);
             let (q_lo, q_hi) = parse_quantile_window(&q);
             let exclude_zero = parse_bool_flag(&q, "exclude_zero");
-            (
-                "200 OK",
-                "application/json",
-                json_cell(digest, distributions, idx, q_lo, q_hi, exclude_zero),
-            )
+            json_cell(digest, distributions, idx, q_lo, q_hi, exclude_zero)
+                .map(|body| ("200 OK", "application/json", body))
         }
         "/api/merge" if method == "POST" => {
             let q = parse_query(query);
             let (q_lo, q_hi) = parse_quantile_window(&q);
             let exclude_zero = parse_bool_flag(&q, "exclude_zero");
             let indices = parse_json_indices(&body_bytes);
-            (
-                "200 OK",
-                "application/json",
-                json_digest_merged(digest.merge_cells(&indices), q_lo, q_hi, exclude_zero),
-            )
+            digest
+                .merge_cells(&indices)
+                .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
+                .map(|body| ("200 OK", "application/json", body))
         }
         "/api/merge" => {
             let q = parse_query(query);
-            let b = q.get("b").and_then(|v| v.parse().ok()).unwrap_or(0usize);
-            let c = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0usize);
             let (q_lo, q_hi) = parse_quantile_window(&q);
             let exclude_zero = parse_bool_flag(&q, "exclude_zero");
-            let body = match q.get("scope").copied() {
-                Some("tensor") => json_digest_merged(digest.merge_all(), q_lo, q_hi, exclude_zero),
-                Some("channel") => json_digest_merged(
-                    digest.merge_channels(&[channel_idx(shape, b, c)]),
-                    q_lo,
-                    q_hi,
-                    exclude_zero,
-                ),
-                _ => unreachable!(),
-            };
-            ("200 OK", "application/json", body)
+            match q.get("scope").copied() {
+                Some("tensor") => digest
+                    .merge_all()
+                    .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
+                    .map(|body| ("200 OK", "application/json", body)),
+                Some("channel") => match parse_coordinates(&q)
+                    .and_then(|(b, c)| channel_idx_checked(shape, b, c))
+                {
+                    Ok(channel) => digest
+                        .merge_channels(&[channel])
+                        .and_then(|merged| json_digest_merged(merged, q_lo, q_hi, exclude_zero))
+                        .map(|body| ("200 OK", "application/json", body)),
+                    Err(message) => Ok(bad_request(message)),
+                },
+                Some(scope) => Ok(bad_request(format!("invalid merge scope: {scope}"))),
+                None => Ok(bad_request("missing merge scope".to_string())),
+            }
         }
-        _ => ("404 Not Found", "text/plain", "Not Found".into()),
+        _ => Ok(("404 Not Found", "text/plain", "Not Found".into())),
+    };
+
+    let (status, ct, body) = match routed {
+        Ok(response) => response,
+        Err(error) => (
+            "500 Internal Server Error",
+            "application/json",
+            format!(r#"{{"error":"{}"}}"#, json_escape(&error.to_string())),
+        ),
     };
 
     let body_bytes = body.as_bytes();
@@ -223,13 +247,45 @@ fn parse_bool_flag(query: &HashMap<&str, &str>, key: &str) -> bool {
     matches!(query.get(key).copied(), Some("1" | "true" | "yes" | "on"))
 }
 
-/// Flat channel index for the given (b, c) coordinates within `shape`.
-fn channel_idx(shape: &[usize], b: usize, c: usize) -> usize {
-    match shape.len() {
-        0..=2 => 0,
-        3 => c,
-        _ => b * shape[1] + c,
+fn parse_coordinates(query: &HashMap<&str, &str>) -> Result<(usize, usize), String> {
+    let parse = |key| match query.get(key) {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| format!("invalid {key} coordinate: {value}")),
+        None => Ok(0),
+    };
+    Ok((parse("b")?, parse("c")?))
+}
+
+/// Flat channel index for valid (b, c) coordinates within `shape`.
+fn channel_idx_checked(shape: &[usize], b: usize, c: usize) -> Result<usize, String> {
+    let valid = match shape.len() {
+        0..=2 => b == 0 && c == 0,
+        3 => b == 0 && c < shape[0],
+        _ => b < shape[0] && c < shape[1],
+    };
+    if !valid {
+        return Err(format!(
+            "channel coordinates b={b}, c={c} are out of range for shape {shape:?}"
+        ));
     }
+
+    match shape.len() {
+        0..=2 => Ok(0),
+        3 => Ok(c),
+        _ => b
+            .checked_mul(shape[1])
+            .and_then(|base| base.checked_add(c))
+            .ok_or_else(|| "channel index overflow".to_string()),
+    }
+}
+
+fn bad_request(message: String) -> (&'static str, &'static str, String) {
+    (
+        "400 Bad Request",
+        "application/json",
+        format!(r#"{{"error":"{}"}}"#, json_escape(&message)),
+    )
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
@@ -243,11 +299,11 @@ fn json_info(shape: &[usize]) -> String {
     format!(r#"{{"shape":[{arr}],"ndim":{}}}"#, shape.len())
 }
 
-fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usize) -> String {
+fn json_slice(shape: &[usize], distributions: &[Distribution], channel: usize) -> String {
     let ndim = shape.len();
     let (h, w) = (shape[ndim - 2], shape[ndim - 1]);
 
-    let offset = channel_idx(shape, b, c) * h * w;
+    let offset = channel * h * w;
 
     let end = (offset + h * w).min(distributions.len());
     let slice = &distributions[offset..end];
@@ -261,26 +317,44 @@ fn json_slice(shape: &[usize], distributions: &[Distribution], b: usize, c: usiz
     format!(r#"{{"rows":{h},"cols":{w},"distributions":[{list}]}}"#)
 }
 
-fn json_digest_cell<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+/// Escape a string for embedding in a JSON string literal.
+///
+/// Error messages are the only untrusted text reaching the response body, and they can carry
+/// quotes from a decoder.
+fn json_escape(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| match c {
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\\' => "\\\\".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            '\t' => "\\t".chars().collect(),
+            c if (c as u32) < 0x20 => format!("\\u{:04x}", c as u32).chars().collect(),
+            c => vec![c],
+        })
+        .collect()
+}
+
+fn json_digest_cell<T: TensorValue, S: StorageOperations<T>>(
+    digest: &mut S,
     dist: Distribution,
     label: &str,
     q_lo: f32,
     q_hi: f32,
-) -> String {
+) -> crate::Result<String> {
     // 402 quantile points: window endpoints plus 400 evenly spaced interior quantiles.
     let qs: Vec<f32> = std::iter::once(q_lo)
         .chain((0..400).map(|i| q_lo + (q_hi - q_lo) * ((i as f32 + 1.0) / 401.0)))
         .chain(std::iter::once(q_hi))
         .collect();
-    let vals = digest.cell_quantiles(0, &qs);
+    let vals = digest.cell_quantiles(0, &qs)?;
 
     let min = vals[0];
     let max = vals[vals.len() - 1];
-    let box_qs = digest.cell_quantiles(0, &[0.25, 0.50, 0.75]);
+    let box_qs = digest.cell_quantiles(0, &[0.25, 0.50, 0.75])?;
     let (q25, q50, q75) = (box_qs[0], box_qs[1], box_qs[2]);
 
-    let count = digest.total_weight(0);
+    let count = digest.total_weight(0)?;
 
     let pdf_pts = qs
         .iter()
@@ -289,45 +363,93 @@ fn json_digest_cell<T: TensorValue>(
         .collect::<Vec<_>>()
         .join(",");
 
-    format!(
+    Ok(format!(
         r#"{{"label":"{label}","distribution":"{dist}","count":{count},"min":{min:.6},"q25":{q25:.6},"q50":{q50:.6},"q75":{q75:.6},"max":{max:.6},"q0":{q_lo:.6},"q1":{q_hi:.6},"pdf":[{pdf_pts}]}}"#
-    )
+    ))
 }
 
-fn json_cell<T: TensorValue>(
-    digest: &mut TensorDigest<T>,
+fn json_cell<T: TensorValue, S: StorageOperations<T>>(
+    digest: &mut S,
     distributions: &[Distribution],
     idx: usize,
     q_lo: f32,
     q_hi: f32,
     exclude_zero: bool,
-) -> String {
+) -> crate::Result<String> {
     let dist = distributions
         .get(idx)
         .copied()
         .unwrap_or(Distribution::Normal);
-    let mut single = digest.merge_cells(&[idx]);
+    let mut single = digest.merge_cells(&[idx])?;
     let mut filtered = if exclude_zero {
-        single.without_zeros()
+        single.without_zeros()?
     } else {
         single
     };
     json_digest_cell(&mut filtered, dist, "cell", q_lo, q_hi)
 }
 
-fn json_digest_merged<T: TensorValue>(
-    mut merged: TensorDigest<T>,
+fn json_digest_merged<T: TensorValue, S: StorageOperations<T>>(
+    mut merged: S,
     q_lo: f32,
     q_hi: f32,
     exclude_zero: bool,
-) -> String {
+) -> crate::Result<String> {
     if exclude_zero {
-        merged = merged.without_zeros();
+        merged = merged.without_zeros()?;
     }
     let dist = merged
-        .analyze()
+        .analyze()?
         .into_iter()
         .next()
         .unwrap_or(Distribution::Unknown);
     json_digest_cell(&mut merged, dist, "merged", q_lo, q_hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::tdigest::TDigestStorage;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+
+    fn route(shape: &[usize], target: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let mut digest = TDigestStorage::<f32>::new(shape, 100);
+        let distributions = vec![Distribution::Normal; shape.iter().product()];
+        handle(&server, shape, &distributions, &mut digest);
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn assert_bad_request(response: &str) {
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "unexpected response: {response}"
+        );
+    }
+
+    #[test]
+    fn get_merge_rejects_missing_and_invalid_scope() {
+        assert_bad_request(&route(&[1, 2, 2], "/api/merge"));
+        assert_bad_request(&route(&[1, 2, 2], "/api/merge?scope=bogus"));
+    }
+
+    #[test]
+    fn slice_rejects_too_few_dimensions_and_bad_coordinates() {
+        assert_bad_request(&route(&[4], "/api/slice"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=2&c=0"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=0&c=3"));
+        assert_bad_request(&route(&[2, 3, 4, 5], "/api/slice?b=nope&c=0"));
+    }
 }

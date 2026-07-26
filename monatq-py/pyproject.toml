@@ -4,15 +4,16 @@ build-backend = "maturin"
 
 [project]
 name = "monatq"
-description = "Approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates"
+description = "Approximate quantile tracking for tensors, with element-wise parallel updates and selectable summary kernels"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Vladimir Monakhov" }]
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
+    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
 
@@ -21,6 +22,7 @@ dev = [
     "pytest",
     "numpy",
     "torch==2.7.0",
+    "torchvision==0.22.0",
 ]
 
 [project.urls]

@@ -1,8 +1,31 @@
 use pyo3::buffer::PyBuffer;
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{
+    PyIOError, PyIndexError, PyNotImplementedError, PyRuntimeError, PyValueError,
+};
 use pyo3::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Translate a monatq error into the closest Python exception.
+///
+/// Before monatq returned `Result`, these conditions were Rust panics that crossed the FFI
+/// boundary as `pyo3_runtime.PanicException` with a Rust backtrace attached. Mapping them
+/// gives Python callers ordinary, catchable exceptions instead.
+fn to_py_err(error: monatq::Error) -> PyErr {
+    match error {
+        monatq::Error::Unsupported { .. } => PyNotImplementedError::new_err(error.to_string()),
+        monatq::Error::IndexOutOfBounds { .. } => PyIndexError::new_err(error.to_string()),
+        monatq::Error::ShapeMismatch { .. } | monatq::Error::InvalidConfig { .. } => {
+            PyValueError::new_err(error.to_string())
+        }
+        monatq::Error::InvalidSnapshot(_) => PyValueError::new_err(error.to_string()),
+        // Display no longer repeats the underlying cause, so report the chain explicitly.
+        monatq::Error::Io(ref inner) => PyIOError::new_err(format!("{error}: {inner}")),
+        // `monatq::Error` is `#[non_exhaustive]`, so a future variant must not break this
+        // build. Anything unrecognized becomes a plain RuntimeError rather than a panic.
+        ref other => PyRuntimeError::new_err(other.to_string()),
+    }
+}
 
 fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
     let s = obj.str()?.to_string();
@@ -52,15 +75,16 @@ fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, u
 
 /// Common input handling for all element types:
 /// buffer protocol (numpy) → torch fast path → Python list fallback.
-fn update_typed<T>(
+fn update_typed<T, K>(
     py: Python<'_>,
-    d: &mut monatq::TensorDigest<T>,
+    d: &mut monatq::TensorDigest<T, K>,
     data: &Bound<'_, PyAny>,
     numel: usize,
     dtype_name: &'static str,
 ) -> PyResult<()>
 where
     T: monatq::TensorValue + pyo3::buffer::Element + for<'a, 'py> FromPyObject<'a, 'py> + Default,
+    K: monatq::DigestKernel<T>,
 {
     // Buffer protocol (numpy arrays)
     if let Ok(buf) = PyBuffer::<T>::get(data) {
@@ -73,7 +97,7 @@ where
         }
         let mut vec = vec![T::default(); numel];
         buf.copy_to_slice(py, &mut vec)?;
-        d.update(&vec);
+        d.update(&vec).map_err(to_py_err)?;
         return Ok(());
     }
     // Torch tensor fast path
@@ -84,7 +108,7 @@ where
             )));
         }
         let slice = unsafe { std::slice::from_raw_parts(ptr as *const T, n) };
-        d.update(slice);
+        d.update(slice).map_err(to_py_err)?;
         return Ok(());
     }
     // Python list fallback
@@ -96,111 +120,120 @@ where
             numel,
         )));
     }
-    d.update(&vec);
+    d.update(&vec).map_err(to_py_err)?;
     Ok(())
 }
 
+/// One digest over every supported (element type, kernel) pair.
+///
+/// Python cannot carry Rust type parameters, so the static choice has to be reified into an
+/// enum here. Each arm is still a monomorphised `TensorDigest` with no dynamic dispatch.
 enum Inner {
-    F32(monatq::TensorDigest<f32>),
-    I32(monatq::TensorDigest<i32>),
+    TDigestF32(monatq::TensorDigest<f32, monatq::TDigest>),
+    TDigestI32(monatq::TensorDigest<i32, monatq::TDigest>),
+    RankKnotF32(monatq::TensorDigest<f32, monatq::RankKnot>),
+    RankKnotI32(monatq::TensorDigest<i32, monatq::RankKnot>),
+}
+
+/// Run the same expression against whichever digest an [`Inner`] holds.
+///
+/// Written as a macro rather than a trait object so the four arms stay statically
+/// dispatched, and so adding a method does not mean writing the same four-way match again.
+macro_rules! dispatch {
+    ($self:expr, $d:ident => $body:expr) => {
+        match $self {
+            Inner::TDigestF32($d) => $body,
+            Inner::TDigestI32($d) => $body,
+            Inner::RankKnotF32($d) => $body,
+            Inner::RankKnotI32($d) => $body,
+        }
+    };
+}
+
+/// Like [`dispatch`], but rewraps the result back into the same variant.
+macro_rules! dispatch_rewrap {
+    ($self:expr, $d:ident => $body:expr) => {
+        match $self {
+            Inner::TDigestF32($d) => Inner::TDigestF32($body),
+            Inner::TDigestI32($d) => Inner::TDigestI32($body),
+            Inner::RankKnotF32($d) => Inner::RankKnotF32($body),
+            Inner::RankKnotI32($d) => Inner::RankKnotI32($body),
+        }
+    };
 }
 
 impl From<monatq::AnyTensorDigest> for Inner {
     fn from(any: monatq::AnyTensorDigest) -> Self {
         match any {
-            monatq::AnyTensorDigest::F32(d) => Inner::F32(d),
-            monatq::AnyTensorDigest::I32(d) => Inner::I32(d),
+            monatq::AnyTensorDigest::TDigestF32(d) => Inner::TDigestF32(d),
+            monatq::AnyTensorDigest::TDigestI32(d) => Inner::TDigestI32(d),
+            monatq::AnyTensorDigest::RankKnotF32(d) => Inner::RankKnotF32(d),
+            monatq::AnyTensorDigest::RankKnotI32(d) => Inner::RankKnotI32(d),
         }
     }
 }
 
 impl Inner {
     fn shape(&self) -> &[usize] {
-        match self {
-            Inner::F32(d) => d.shape(),
-            Inner::I32(d) => d.shape(),
-        }
+        dispatch!(self, d => d.shape())
     }
     fn numel(&self) -> usize {
-        match self {
-            Inner::F32(d) => d.numel(),
-            Inner::I32(d) => d.numel(),
-        }
+        dispatch!(self, d => d.numel())
     }
     fn dtype(&self) -> &'static str {
         match self {
-            Inner::F32(_) => "float32",
-            Inner::I32(_) => "int32",
+            Inner::TDigestF32(_) | Inner::RankKnotF32(_) => "float32",
+            Inner::TDigestI32(_) | Inner::RankKnotI32(_) => "int32",
+        }
+    }
+    fn kernel(&self) -> &'static str {
+        match self {
+            Inner::TDigestF32(_) | Inner::TDigestI32(_) => "tdigest",
+            Inner::RankKnotF32(_) | Inner::RankKnotI32(_) => "rankknot",
         }
     }
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
         let numel = self.numel();
         let dtype = self.dtype();
-        match self {
-            Inner::F32(d) => update_typed(py, d, data, numel, dtype),
-            Inner::I32(d) => update_typed(py, d, data, numel, dtype),
-        }
+        dispatch!(self, d => update_typed(py, d, data, numel, dtype))
     }
     fn flush(&mut self) {
-        match self {
-            Inner::F32(d) => d.flush(),
-            Inner::I32(d) => d.flush(),
-        }
+        dispatch!(self, d => d.flush())
     }
     fn quantile(&mut self, q: f32) -> Vec<f32> {
-        match self {
-            Inner::F32(d) => d.quantile(q),
-            Inner::I32(d) => d.quantile(q),
-        }
+        dispatch!(self, d => d.quantile(q))
     }
     fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
-        match self {
-            Inner::F32(d) => d.quantiles(qs),
-            Inner::I32(d) => d.quantiles(qs),
-        }
+        dispatch!(self, d => d.quantiles(qs))
     }
-    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
+    fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> monatq::Result<Vec<f32>> {
         self.flush();
-        match self {
-            Inner::F32(d) => d.cell_quantiles(idx, qs),
-            Inner::I32(d) => d.cell_quantiles(idx, qs),
-        }
+        dispatch!(self, d => d.cell_quantiles(idx, qs))
     }
-    fn analyze(&mut self) -> Vec<monatq::Distribution> {
-        match self {
-            Inner::F32(d) => d.analyze(),
-            Inner::I32(d) => d.analyze(),
-        }
+    fn analyze(&mut self) -> monatq::Result<Vec<monatq::Distribution>> {
+        dispatch!(self, d => d.analyze())
     }
-    fn merge_cells(&mut self, indices: &[usize]) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_cells(indices)),
-            Inner::I32(d) => Inner::I32(d.merge_cells(indices)),
-        }
+    fn merge_cells(&mut self, indices: &[usize]) -> monatq::Result<Self> {
+        Ok(dispatch_rewrap!(self, d => d.merge_cells(indices)?))
     }
-    fn merge_channels(&mut self, channel_indices: &[usize]) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_channels(channel_indices)),
-            Inner::I32(d) => Inner::I32(d.merge_channels(channel_indices)),
-        }
+    fn merge_channels(&mut self, channel_indices: &[usize]) -> monatq::Result<Self> {
+        Ok(dispatch_rewrap!(self, d => d.merge_channels(channel_indices)?))
     }
-    fn merge_all(&mut self) -> Self {
-        match self {
-            Inner::F32(d) => Inner::F32(d.merge_all()),
-            Inner::I32(d) => Inner::I32(d.merge_all()),
-        }
+    fn merge_all(&mut self) -> monatq::Result<Self> {
+        Ok(dispatch_rewrap!(self, d => d.merge_all()?))
     }
-    fn save(&mut self, path: &str) -> std::io::Result<()> {
-        match self {
-            Inner::F32(d) => d.save(path),
-            Inner::I32(d) => d.save(path),
-        }
+    fn without_zeros(&mut self) -> monatq::Result<Self> {
+        Ok(dispatch_rewrap!(self, d => d.without_zeros()?))
     }
-    fn visualize_until(&mut self, stop: &AtomicBool) -> std::io::Result<()> {
-        match self {
-            Inner::F32(d) => d.visualize_until(stop),
-            Inner::I32(d) => d.visualize_until(stop),
-        }
+    fn save(&mut self, path: &str) -> monatq::Result<()> {
+        dispatch!(self, d => d.save(path))
+    }
+    #[allow(clippy::wrong_self_convention)]
+    fn to_bytes(&mut self) -> monatq::Result<Vec<u8>> {
+        dispatch!(self, d => d.to_bytes())
+    }
+    fn visualize_until(&mut self, stop: &AtomicBool) -> monatq::Result<()> {
+        dispatch!(self, d => d.visualize_until(stop))
     }
 }
 
@@ -211,19 +244,78 @@ struct PyTensorDigest {
 
 #[pymethods]
 impl PyTensorDigest {
+    /// Build a digest over `shape`.
+    ///
+    /// `kernel` defaults to `"rankknot"`. The tuning knobs are kernel-specific:
+    /// `compression` belongs to `"tdigest"` and `buffer_capacity` to `"rankknot"`. Passing
+    /// one that does not belong to the selected kernel is an error rather than a silent
+    /// no-op, because silently ignoring an accuracy knob is the kind of thing a caller only
+    /// discovers from a bad result much later.
     #[new]
-    #[pyo3(signature = (shape, compression, dtype = None))]
+    #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None))]
     fn new(
         shape: Vec<usize>,
-        compression: usize,
+        kernel: &str,
+        compression: Option<usize>,
+        buffer_capacity: Option<usize>,
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let inner = match dtype.map(normalize_dtype).transpose()?.unwrap_or("float32") {
-            "float32" => Inner::F32(monatq::TensorDigest::<f32>::new(&shape, compression)),
-            "int32" => Inner::I32(monatq::TensorDigest::<i32>::new(&shape, compression)),
-            other => unreachable!("normalize_dtype returned unexpected value: {other}"),
+        let dtype = dtype.map(normalize_dtype).transpose()?.unwrap_or("float32");
+        let kernel_name = kernel.trim().to_ascii_lowercase();
+
+        let reject = |knob: &str, owner: &str| {
+            Err(PyValueError::new_err(format!(
+                "{knob} is a {owner} setting and has no effect on kernel {kernel_name:?}"
+            )))
+        };
+
+        let inner = match kernel_name.as_str() {
+            "rankknot" => {
+                if compression.is_some() {
+                    return reject("compression", "tdigest");
+                }
+                let config = match buffer_capacity {
+                    Some(0) => {
+                        return Err(PyValueError::new_err("buffer_capacity must be positive"));
+                    }
+                    Some(capacity) => monatq::RankKnotConfig {
+                        buffer_capacity: capacity,
+                    },
+                    None => monatq::RankKnotConfig::default(),
+                };
+                match dtype {
+                    "float32" => {
+                        Inner::RankKnotF32(monatq::TensorDigest::with_config(&shape, config))
+                    }
+                    _ => Inner::RankKnotI32(monatq::TensorDigest::with_config(&shape, config)),
+                }
+            }
+            "tdigest" => {
+                if buffer_capacity.is_some() {
+                    return reject("buffer_capacity", "rankknot");
+                }
+                let config = monatq::TDigestConfig {
+                    compression: compression.unwrap_or(100),
+                };
+                match dtype {
+                    "float32" => {
+                        Inner::TDigestF32(monatq::TensorDigest::with_config(&shape, config))
+                    }
+                    _ => Inner::TDigestI32(monatq::TensorDigest::with_config(&shape, config)),
+                }
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown kernel {other:?}; supported: rankknot, tdigest"
+                )));
+            }
         };
         Ok(Self { inner })
+    }
+
+    #[getter]
+    fn kernel(&self) -> &str {
+        self.inner.kernel()
     }
 
     #[getter]
@@ -257,39 +349,73 @@ impl PyTensorDigest {
         self.inner.quantiles(&qs)
     }
 
-    fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> Vec<f32> {
-        self.inner.cell_quantiles(idx, &qs)
+    fn cell_quantiles(&mut self, idx: usize, qs: Vec<f32>) -> PyResult<Vec<f32>> {
+        self.inner.cell_quantiles(idx, &qs).map_err(to_py_err)
     }
 
-    fn analyze(&mut self) -> Vec<String> {
-        self.inner.analyze().iter().map(|d| d.to_string()).collect()
+    fn analyze(&mut self) -> PyResult<Vec<String>> {
+        Ok(self
+            .inner
+            .analyze()
+            .map_err(to_py_err)?
+            .iter()
+            .map(|d| d.to_string())
+            .collect())
     }
 
-    fn merge_cells(&mut self, indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_cells(&indices),
-        }
+    fn merge_cells(&mut self, indices: Vec<usize>) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self.inner.merge_cells(&indices).map_err(to_py_err)?,
+        })
     }
 
-    fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_channels(&channel_indices),
-        }
+    fn merge_channels(&mut self, channel_indices: Vec<usize>) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self
+                .inner
+                .merge_channels(&channel_indices)
+                .map_err(to_py_err)?,
+        })
     }
 
-    fn merge_all(&mut self) -> PyTensorDigest {
-        PyTensorDigest {
-            inner: self.inner.merge_all(),
-        }
+    fn merge_all(&mut self) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self.inner.merge_all().map_err(to_py_err)?,
+        })
+    }
+
+    /// Copy of this digest with values at zero removed.
+    ///
+    /// Quantiles of the result describe the nonzero subpopulation; `count` is unchanged and
+    /// no longer matches it.
+    fn without_zeros(&mut self) -> PyResult<PyTensorDigest> {
+        Ok(PyTensorDigest {
+            inner: self.inner.without_zeros().map_err(to_py_err)?,
+        })
     }
 
     fn save(&mut self, path: &str) -> PyResult<()> {
-        self.inner.save(path).map_err(PyIOError::new_err)
+        self.inner.save(path).map_err(to_py_err)
     }
 
+    /// Serialize to a `bytes` snapshot. Pairs with `from_bytes`.
+    #[allow(clippy::wrong_self_convention)]
+    fn to_bytes<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let bytes = self.inner.to_bytes().map_err(to_py_err)?;
+        Ok(pyo3::types::PyBytes::new(py, &bytes))
+    }
+
+    /// Load a snapshot, detecting its kernel and element type from the bytes themselves.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<PyTensorDigest> {
+        let inner = monatq::from_bytes(data).map_err(to_py_err)?.into();
+        Ok(PyTensorDigest { inner })
+    }
+
+    /// Load a snapshot from `path`, detecting its kernel and element type.
     #[staticmethod]
     fn load(path: &str) -> PyResult<PyTensorDigest> {
-        let inner = monatq::load(path).map_err(PyIOError::new_err)?.into();
+        let inner = monatq::load(path).map_err(to_py_err)?.into();
         Ok(PyTensorDigest { inner })
     }
 
@@ -297,7 +423,7 @@ impl PyTensorDigest {
         let stop = AtomicBool::new(false);
 
         let result = py.detach(|| {
-            std::thread::scope(|scope| -> PyResult<std::io::Result<()>> {
+            std::thread::scope(|scope| -> PyResult<monatq::Result<()>> {
                 let handle = scope.spawn(|| self.inner.visualize_until(&stop));
                 loop {
                     if handle.is_finished() {
@@ -313,7 +439,7 @@ impl PyTensorDigest {
             })
         });
 
-        result?.map_err(PyIOError::new_err)
+        result?.map_err(to_py_err)
     }
 }
 

@@ -16,15 +16,15 @@ fn xorshift32(s: &mut u32) -> f64 {
     (*s as f64) / (u32::MAX as f64 + 1.0)
 }
 
-fn make_digest() -> TensorDigest<f32> {
+fn make_digest() -> TensorDigest<f32, monatq::TDigest> {
     let dist = Normal::new(0.0, 1.0).unwrap();
     let mut rng = 0xDEAD_BEEFu32;
-    let mut td = TensorDigest::new(&[NUMEL], 100);
+    let mut td = TensorDigest::<_, monatq::TDigest>::new(&[NUMEL]);
     let data: Vec<f32> = (0..SAMPLES * NUMEL)
         .map(|_| dist.inverse_cdf(xorshift32(&mut rng)) as f32)
         .collect();
     for sample in data.chunks_exact(NUMEL) {
-        td.update(sample);
+        td.update(sample).unwrap();
     }
     td
 }
@@ -59,7 +59,7 @@ fn load_1k_elements(bencher: divan::Bencher) {
 
     bencher
         .counter(BytesCount::new(file_size))
-        .bench(|| TensorDigest::<f32>::load(&path).unwrap());
+        .bench(|| TensorDigest::<f32, monatq::TDigest>::load(&path).unwrap());
     std::fs::remove_file(&path).ok();
 }
 
@@ -68,7 +68,7 @@ fn file_size_bytes(bencher: divan::Bencher) {
     let path = std::env::temp_dir().join("monatq_bench_size.bin");
     make_digest().save(&path).unwrap();
 
-    bencher.bench(|| TensorDigest::<f32>::load(&path).unwrap());
+    bencher.bench(|| TensorDigest::<f32, monatq::TDigest>::load(&path).unwrap());
 
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

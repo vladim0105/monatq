@@ -108,7 +108,7 @@ def main():
     # Conv output shape: [B, 8, 28, 28]
     # We track each (channel, row, col) position independently → shape [8, 28, 28].
     HOOK_SHAPE = [8, 28, 28]
-    td = TensorDigest(HOOK_SHAPE, compression=100)
+    td = TensorDigest(HOOK_SHAPE)
 
     activations_seen = 0
 

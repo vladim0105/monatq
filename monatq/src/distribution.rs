@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use statrs::distribution::{ContinuousCDF, Laplace, LogNormal, Normal, Uniform};
 use strum::IntoEnumIterator;
+use wide::f32x8;
 
 pub(crate) const N_PROBES: usize = 50;
 /// Padded to the next multiple of 8 so the SIMD loop in `kernel` needs no scalar tail.
@@ -42,7 +43,63 @@ pub(crate) fn ref_profiles() -> &'static RefProfiles {
     })
 }
 
-/// Distribution family identified by [`TensorDigest::analyze`].
+/// L1 distance above which no reference family is considered a match.
+///
+/// Calibrated against the t-digest kernel; shared so every kernel classifies on the same
+/// scale and `analyze` results stay comparable across backends.
+const UNKNOWN_THRESHOLD: f32 = 10.8;
+
+/// Classify one empirical distribution from its quantile function.
+///
+/// `quantile` is the only thing a kernel has to supply, which is why this lives here rather
+/// than in a kernel: the procedure is identical for any summary that can answer a rank
+/// query. Standardise the empirical profile by its own median and interquantile spread, then
+/// take the nearest reference profile in L1.
+///
+/// Returns [`Distribution::Unknown`] for a degenerate summary (no measurable spread) or when
+/// the best fit is still too far away.
+pub(crate) fn classify(mut quantile: impl FnMut(f32) -> f32) -> Distribution {
+    let median = quantile(0.5);
+    let spread = (quantile(0.84) - quantile(0.16)) / 2.0;
+    if !spread.is_finite() || spread.abs() < 1e-6 {
+        return Distribution::Unknown;
+    }
+
+    let probes = probe_points();
+    let mut empirical = [0f32; N_PADDED];
+    for (slot, &p) in empirical.iter_mut().zip(probes.iter()) {
+        *slot = (quantile(p) - median) / spread;
+    }
+
+    let profiles = ref_profiles();
+    let (best, best_distance) = Distribution::iter()
+        .map(|d| (d, l1_distance(&empirical, &profiles.0[d.index()])))
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .expect("Distribution::iter() is never empty");
+
+    if best_distance > UNKNOWN_THRESHOLD {
+        Distribution::Unknown
+    } else {
+        best
+    }
+}
+
+/// Sum of absolute differences over `N_PADDED` lanes.
+///
+/// `N_PADDED` is a multiple of 8 and the tail is zero-filled, so this needs no scalar
+/// remainder loop.
+fn l1_distance(a: &[f32; N_PADDED], b: &[f32; N_PADDED]) -> f32 {
+    let mut acc = f32x8::splat(0.0);
+    for i in (0..N_PADDED).step_by(8) {
+        let va = f32x8::from(<[f32; 8]>::try_from(&a[i..i + 8]).unwrap());
+        let vb = f32x8::from(<[f32; 8]>::try_from(&b[i..i + 8]).unwrap());
+        let diff = va - vb;
+        acc += diff.max(-diff);
+    }
+    acc.reduce_add()
+}
+
+/// Distribution family identified by [`TensorDigest::analyze`](crate::TensorDigest::analyze).
 ///
 /// Each variant corresponds to a canonical shape matched against the empirical
 /// quantile profile via L1 distance. `Unknown` is returned when no family fits
