@@ -275,9 +275,6 @@ impl PyTensorDigest {
                     return reject("compression", "tdigest");
                 }
                 let config = match buffer_capacity {
-                    Some(0) => {
-                        return Err(PyValueError::new_err("buffer_capacity must be positive"));
-                    }
                     Some(capacity) => monatq::RankKnotConfig {
                         buffer_capacity: capacity,
                     },

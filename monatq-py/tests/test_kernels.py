@@ -51,9 +51,12 @@ class TestConfigKnobs:
         assert td.quantile(0.0)[0] == pytest.approx(0.0)
         assert td.quantile(1.0)[0] == pytest.approx(99.0)
 
-    def test_zero_buffer_capacity_is_rejected(self):
-        with pytest.raises(ValueError, match="must be positive"):
-            TensorDigest([4], kernel="rankknot", buffer_capacity=0)
+    def test_zero_buffer_capacity_is_accepted(self):
+        td = TensorDigest([1], kernel="rankknot", buffer_capacity=0)
+        for value in range(100):
+            td.update(np.array([float(value)], dtype=np.float32))
+        assert td.quantile(0.0)[0] == pytest.approx(0.0)
+        assert td.quantile(1.0)[0] == pytest.approx(99.0)
 
     def test_shape_is_still_positional(self):
         assert TensorDigest([2, 3]).shape == [2, 3]

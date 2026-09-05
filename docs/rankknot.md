@@ -86,7 +86,9 @@ Both supported input types are summarized at `f32` resolution. An `i32` magnitud
 
 `update` first checks that the sample contains exactly `numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
 
-When the buffer reaches `buffer_capacity`, or a query explicitly flushes it, each tensor position is processed independently in parallel:
+Setting `buffer_capacity` to `0` bypasses the input buffer and updates immediately on every sample.
+
+When the buffer reaches a positive `buffer_capacity`, or a query explicitly flushes it, each tensor position is processed independently in parallel:
 
 1. Gather the position's buffered column into worker-local `f32` scratch.
 2. Sort the incoming values.

@@ -19,6 +19,7 @@ pub struct RankKnot;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RankKnotConfig {
     /// Number of complete tensor samples buffered before parallel compression.
+    /// Zero bypasses buffering and updates immediately on every sample.
     pub buffer_capacity: usize,
 }
 

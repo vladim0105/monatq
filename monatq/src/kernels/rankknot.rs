@@ -154,10 +154,6 @@ pub(crate) struct RankKnotStorage<T> {
 
 impl<T: TensorValue> RankKnotStorage<T> {
     pub(crate) fn with_config(shape: &[usize], config: RankKnotConfig) -> Self {
-        assert!(
-            config.buffer_capacity > 0,
-            "buffer_capacity must be positive"
-        );
         let numel = shape.iter().product::<usize>();
         let buffer_len = numel
             .checked_mul(config.buffer_capacity)
@@ -171,6 +167,51 @@ impl<T: TensorValue> RankKnotStorage<T> {
             sample_count: 0,
             states: vec![RankKnotState::default(); numel],
         }
+    }
+
+    /// Merge row-major samples, borrowing either the input directly or the row buffer.
+    fn process_batch(
+        states: &mut [RankKnotState],
+        sample_count: &mut u64,
+        data: &[T],
+        rows: usize,
+    ) {
+        let numel = states.len();
+        let old_count = *sample_count;
+        states
+            .par_iter_mut()
+            .with_min_len(64)
+            .enumerate()
+            .for_each_init(
+                || RankKnotScratch::new(rows),
+                |scratch, (position, state)| {
+                    scratch.incoming.clear();
+                    // Project raw values to the resolution used by compression.
+                    scratch
+                        .incoming
+                        .extend(data.chunks_exact(numel).map(|row| row[position].to_f32()));
+                    scratch
+                        .incoming
+                        .sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
+                    let minimum = scratch.incoming[0];
+                    let maximum = scratch.incoming[rows - 1];
+                    merge_old_and_incoming(
+                        state,
+                        old_count,
+                        &scratch.incoming,
+                        &mut scratch.entries,
+                    );
+                    if old_count == 0 {
+                        state.min = minimum;
+                        state.max = maximum;
+                    } else {
+                        update_min(&mut state.min, minimum);
+                        update_max(&mut state.max, maximum);
+                    }
+                    compress_and_store(&scratch.entries, state, &mut scratch.boundaries);
+                },
+            );
+        *sample_count = sample_count.saturating_add(rows as u64);
     }
 
     pub(crate) fn sample_count(&self) -> u64 {
@@ -546,6 +587,10 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
 
     fn update(&mut self, data: &[T]) -> Result<()> {
         check_sample_len(data.len(), self.numel)?;
+        if self.config.buffer_capacity == 0 {
+            Self::process_batch(&mut self.states, &mut self.sample_count, data, 1);
+            return Ok(());
+        }
         let start = self.n_buffered * self.numel;
         self.row_buffer[start..start + self.numel].copy_from_slice(data);
         self.n_buffered += 1;
@@ -559,46 +604,12 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
         if self.n_buffered == 0 {
             return;
         }
-        let rows = self.n_buffered;
-        let numel = self.numel;
-        let old_count = self.sample_count;
-        let buffer = &self.row_buffer[..rows * numel];
-        self.states
-            .par_iter_mut()
-            .with_min_len(64)
-            .enumerate()
-            .for_each_init(
-                || RankKnotScratch::new(rows),
-                |scratch, (position, state)| {
-                    scratch.incoming.clear();
-                    // The buffer holds raw `T`; project this position's column to `f32`,
-                    // which is the resolution every downstream step works in.
-                    scratch
-                        .incoming
-                        .extend(buffer.chunks_exact(numel).map(|row| row[position].to_f32()));
-                    scratch
-                        .incoming
-                        .sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
-                    let minimum = scratch.incoming[0];
-                    let maximum = scratch.incoming[rows - 1];
-
-                    merge_old_and_incoming(
-                        state,
-                        old_count,
-                        &scratch.incoming,
-                        &mut scratch.entries,
-                    );
-                    if old_count == 0 {
-                        state.min = minimum;
-                        state.max = maximum;
-                    } else {
-                        update_min(&mut state.min, minimum);
-                        update_max(&mut state.max, maximum);
-                    }
-                    compress_and_store(&scratch.entries, state, &mut scratch.boundaries);
-                },
-            );
-        self.sample_count = self.sample_count.saturating_add(rows as u64);
+        Self::process_batch(
+            &mut self.states,
+            &mut self.sample_count,
+            &self.row_buffer[..self.n_buffered * self.numel],
+            self.n_buffered,
+        );
         self.n_buffered = 0;
     }
 
@@ -1043,6 +1054,29 @@ fn update_max<T: PartialOrd + Copy>(current: &mut T, candidate: T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_capacity_updates_immediately_without_buffering() {
+        let mut direct =
+            RankKnotStorage::<f32>::with_config(&[2], RankKnotConfig { buffer_capacity: 0 });
+        let mut single =
+            RankKnotStorage::<f32>::with_config(&[2], RankKnotConfig { buffer_capacity: 1 });
+        for i in 0..100 {
+            let sample = [i as f32, -(i as f32)];
+            direct.update(&sample).unwrap();
+            single.update(&sample).unwrap();
+            assert_eq!(direct.sample_count, i as u64 + 1);
+            assert_eq!(direct.n_buffered, 0);
+            assert!(direct.row_buffer.is_empty());
+            for q in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                assert_eq!(direct.quantile(q), single.quantile(q));
+            }
+        }
+        assert!(direct.update(&[1.0]).is_err());
+        assert_eq!(direct.sample_count, 100);
+        direct.flush();
+        assert_eq!(direct.sample_count, 100);
+    }
 
     #[test]
     fn ties_even_integer_quantization() {
