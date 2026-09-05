@@ -10,8 +10,7 @@ pub mod tensor_value;
 
 pub use distribution::Distribution;
 pub use error::{Error, Result};
-pub use kernels::quantile_spine::{QuantileSpineConfig, SpineLink, SpineRegime};
-pub use kernels::{DigestKernel, QuantileSpine, RankKnot, RankKnotConfig, TDigest, TDigestConfig};
+pub use kernels::{DigestKernel, RankKnot, RankKnotConfig, TDigest, TDigestConfig};
 pub use tensor_digest::TensorDigest;
 pub use tensor_value::TensorValue;
 

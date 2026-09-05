@@ -103,11 +103,6 @@ impl From<Error> for std::io::Error {
     }
 }
 
-/// Build an [`Error::Unsupported`] for a kernel operation that is still a stub.
-pub(crate) fn unsupported<T>(kernel: &'static str, operation: &'static str) -> Result<T> {
-    Err(Error::Unsupported { kernel, operation })
-}
-
 /// Validate a flat tensor position.
 pub(crate) fn check_index(index: usize, numel: usize) -> Result<()> {
     if index < numel {

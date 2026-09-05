@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use crate::{
     Result, TensorValue,
-    kernels::{self, DigestKernel, QuantileSpine, RankKnot},
+    kernels::{self, DigestKernel, RankKnot},
 };
 
 /// Operations shared by every kernel-specific storage layout.
@@ -264,71 +264,5 @@ impl<T: TensorValue> TensorDigest<T, RankKnot> {
     pub fn cell_max(&mut self, idx: usize) -> Result<f32> {
         crate::error::check_index(idx, self.numel())?;
         Ok(self.storage.cell_max(idx))
-    }
-}
-
-impl<T: TensorValue> TensorDigest<T, QuantileSpine> {
-    pub fn sample_count(&self) -> u32 {
-        self.storage.sample_count()
-    }
-
-    pub fn config(&self) -> &crate::QuantileSpineConfig {
-        self.storage.config()
-    }
-
-    pub fn link(&mut self) -> crate::SpineLink {
-        self.storage.link()
-    }
-
-    pub fn min(&mut self) -> Vec<f32> {
-        self.storage.min()
-    }
-
-    pub fn max(&mut self) -> Vec<f32> {
-        self.storage.max()
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn cell_min(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.cell_min(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn cell_max(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.cell_max(idx))
-    }
-
-    pub fn recent_min(&mut self) -> Vec<f32> {
-        self.storage.recent_min()
-    }
-
-    pub fn recent_max(&mut self) -> Vec<f32> {
-        self.storage.recent_max()
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn zero_count(&mut self, idx: usize) -> Result<u32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.zero_count(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn secondary_atom(&mut self, idx: usize) -> Result<Option<(f32, u32)>> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.secondary_atom(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn surprise(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.surprise(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn regime(&mut self, idx: usize) -> Result<crate::SpineRegime> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.regime(idx))
     }
 }

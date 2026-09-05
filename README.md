@@ -2,7 +2,7 @@
 
 **Monakhov Tensor Quantiles** - approximate quantile tracking for tensors.
 
-`monatq` provides a unified `TensorDigest<T, K>` container with statically selected `RankKnot`, `TDigest`, and `QuantileSpine` kernels. `K` defaults to `RankKnot`. Each kernel retains its optimized flat storage layout, and updates are parallelised element-wise via Rayon.
+`monatq` provides a unified `TensorDigest<T, K>` container with statically selected `RankKnot` and `TDigest` kernels. `K` defaults to `RankKnot`. Each kernel retains its optimized flat storage layout, and updates are parallelised element-wise via Rayon.
 
 ## Use Cases
 
@@ -66,21 +66,12 @@ winners, and throughput depends on tensor shape and platform. See the
 for the algorithm, invariants, complexity, complete initial results, reproduction commands,
 and limitations.
 
-Select Quantile Spine without runtime dispatch:
-
-```rust
-use monatq::{QuantileSpine, TensorDigest};
-
-let mut digest = TensorDigest::<f32, QuantileSpine>::new(&[3, 4]);
-```
-
 ### Kernels
 
 | Kernel | Element types | Contract |
 | --- | --- | --- |
 | `RankKnot` *(default)* | `f32`, `i32` | complete; 208 B of state per position |
 | `TDigest` | `f32`, `i32` | complete; ~4,900 B of state per position |
-| `QuantileSpine` | `f32`, `i32` | queries only; everything else returns `Unsupported` |
 
 Every kernel is selected statically, so there is no runtime dispatch cost. Name one
 explicitly to override the default:
@@ -91,7 +82,7 @@ use monatq::{TDigest, TensorDigest};
 let mut digest = TensorDigest::<f32, TDigest>::new(&[3, 4]);
 ```
 
-Both complete kernels summarise `i32` at `f32` resolution, so integer magnitudes above 2^24
+Both kernels summarise `i32` at `f32` resolution, so integer magnitudes above 2^24
 round to the nearest representable value.
 
 ### Errors
@@ -100,15 +91,14 @@ Fallible calls return `monatq::Result<T>`. Queries that cannot fail — `quantil
 `quantiles`, `flush`, `numel`, `shape` — stay infallible, so they need no `?`.
 
 ```rust
-use monatq::{Error, QuantileSpine, TensorDigest};
+use monatq::{Error, TensorDigest};
 
-let mut digest = TensorDigest::<f32, QuantileSpine>::new(&[3, 4]);
+let mut digest = TensorDigest::<f32>::new(&[3, 4]);
 
-match digest.merge_all() {
-    Ok(merged) => { /* ... */ }
-    // Not every kernel implements every operation. This is a property of the
-    // kernel, not of the data: it will never start succeeding.
-    Err(error @ Error::Unsupported { .. }) => eprintln!("{error}"),
+match digest.update(&[1.0, 2.0]) {
+    Ok(()) => { /* ... */ }
+    // Samples must match the tensor's element count.
+    Err(error @ Error::ShapeMismatch { .. }) => eprintln!("{error}"),
     Err(error) => return Err(error),
 }
 ```

@@ -24,7 +24,7 @@ class TestKernelSelection:
 
     def test_unknown_kernel_is_rejected(self):
         with pytest.raises(ValueError, match="unknown kernel"):
-            TensorDigest([4], kernel="quantilespine")
+            TensorDigest([4], kernel="unknown")
 
     def test_both_dtypes_work_on_both_kernels(self):
         for kernel in ("rankknot", "tdigest"):

@@ -235,20 +235,20 @@ These measurements are initial implementation evidence, not universal accuracy o
 
 An estimate receives zero error when the requested probability lies inside the empirical CDF jump for that returned value. Lower values are better.
 
-| Workload | RankKnot mean / max | TDigest mean / max | QuantileSpine mean / max |
-| --- | ---: | ---: | ---: |
-| Normal | 0.000458 / 0.001460 | 0.000627 / 0.006950 | 0.000302 / 0.001490 |
-| Uniform | 0.000681 / 0.001170 | 0.001334 / 0.007380 | 0.000575 / 0.001780 |
-| Log-normal | 0.000860 / 0.002290 | 0.001831 / 0.012570 | 0.000758 / 0.002130 |
-| Exponential | 0.000840 / 0.001940 | 0.001623 / 0.010610 | 0.000872 / 0.002360 |
-| Laplace | 0.000700 / 0.001880 | 0.000775 / 0.007120 | 0.000705 / 0.019580 |
-| Overlapping bimodal | 0.000469 / 0.001450 | 0.000896 / 0.007580 | 0.000326 / 0.001710 |
-| 32-level normal | 0.000094 / 0.000660 | 0.009511 / 0.034780 | 0.011590 / 0.055840 |
-| 50% zeros | 0.000380 / 0.001380 | 0.026949 / 0.252720 | 0.000096 / 0.000600 |
-| 95% zero activations | 0.000508 / 0.006160 | 0.000359 / 0.004750 | 0.000031 / 0.000420 |
-| Heterogeneous tensor | 0.000511 / 0.002260 | 0.003170 / 0.051750 | 0.001411 / 0.039770 |
+| Workload | RankKnot mean / max | TDigest mean / max |
+| --- | ---: | ---: |
+| Normal | 0.000458 / 0.001460 | 0.000627 / 0.006950 |
+| Uniform | 0.000681 / 0.001170 | 0.001334 / 0.007380 |
+| Log-normal | 0.000860 / 0.002290 | 0.001831 / 0.012570 |
+| Exponential | 0.000840 / 0.001940 | 0.001623 / 0.010610 |
+| Laplace | 0.000700 / 0.001880 | 0.000775 / 0.007120 |
+| Overlapping bimodal | 0.000469 / 0.001450 | 0.000896 / 0.007580 |
+| 32-level normal | 0.000094 / 0.000660 | 0.009511 / 0.034780 |
+| 50% zeros | 0.000380 / 0.001380 | 0.026949 / 0.252720 |
+| 95% zero activations | 0.000508 / 0.006160 | 0.000359 / 0.004750 |
+| Heterogeneous tensor | 0.000511 / 0.002260 | 0.003170 / 0.051750 |
 
-RankKnot had lower mean and maximum error than TDigest on nine of the ten representative workloads. The 95%-zero workload is the counterexample. QuantileSpine wins several workloads but does not implement merging, analysis, zero filtering, snapshots, or visualization.
+RankKnot had lower mean and maximum error than TDigest on nine of the ten representative workloads. The 95%-zero workload is the counterexample.
 
 The adversarial report uses 65,536 samples at one position and 1,003 probabilities. Its winners are mixed; no universal ordering is claimed.
 
@@ -259,7 +259,6 @@ Heap figures come from an instrumented global allocator and exclude input data, 
 | Backend | Retained after flush | Ingestion peak |
 | --- | ---: | ---: |
 | RankKnot | 39,432 B | 45,064 B |
-| QuantileSpine | 77,320 B | 113,160 B |
 | TDigest | 182,408 B | 234,328–239,208 B |
 
 RankKnot used about 78% less retained heap and 81% less peak heap than TDigest in this run. These allocator totals include input buffers, shape vectors, headers, and worker scratch; they are intentionally larger than the 208-byte summary-state figure.

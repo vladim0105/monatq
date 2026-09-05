@@ -1,4 +1,3 @@
-pub(crate) mod quantile_spine;
 pub(crate) mod rankknot;
 pub(crate) mod tdigest;
 
@@ -7,10 +6,6 @@ use crate::{TensorValue, tensor_digest::StorageOperations};
 /// Marker selecting the T-Digest kernel.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TDigest;
-
-/// Marker selecting the Quantile Spine kernel.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct QuantileSpine;
 
 /// Marker selecting the RankKnot kernel.
 ///

@@ -1,5 +1,5 @@
 //! The error surface itself: messages, classification, and the source chain.
-use monatq::{QuantileSpine, RankKnot, TensorDigest};
+use monatq::{Error, RankKnot, TensorDigest};
 use std::error::Error as _;
 
 #[test]
@@ -30,19 +30,21 @@ fn malformed_bytes_are_snapshot_errors_not_io_errors() {
 
 #[test]
 fn error_messages_name_the_kernel_and_the_operation() {
-    let mut spine = TensorDigest::<f32, QuantileSpine>::new(&[1]);
-    let error = spine.merge_all().expect_err("spine cannot merge");
-    assert_eq!(
-        error.to_string(),
-        "QuantileSpine does not implement merge_all"
-    );
+    let error = Error::Unsupported {
+        kernel: "TestKernel",
+        operation: "merge_all",
+    };
+    assert_eq!(error.to_string(), "TestKernel does not implement merge_all");
     assert!(error.is_unsupported());
 }
 
 #[test]
 fn errors_convert_into_io_errors_for_io_shaped_callers() {
-    let mut spine = TensorDigest::<f32, QuantileSpine>::new(&[1]);
-    let converted: std::io::Error = spine.merge_all().unwrap_err().into();
+    let converted: std::io::Error = Error::Unsupported {
+        kernel: "TestKernel",
+        operation: "merge_all",
+    }
+    .into();
     assert_eq!(converted.kind(), std::io::ErrorKind::InvalidInput);
 
     let snapshot_error: std::io::Error = TensorDigest::<f32, RankKnot>::from_bytes(&[9, 9, 9])
