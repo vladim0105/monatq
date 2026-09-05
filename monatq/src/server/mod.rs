@@ -432,11 +432,42 @@ mod tests {
         response
     }
 
+    fn route_blocked(target: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let layout =
+            crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::new(2, 1)).unwrap();
+        let mut digest = TDigestStorage::<f32>::with_layout(layout, 100);
+        digest.update(&(0..20).map(|value| value as f32).collect::<Vec<_>>());
+        let shape = <TDigestStorage<f32> as StorageOperations<f32>>::shape(&digest).to_vec();
+        let distributions = digest.analyze();
+        handle(&server, &shape, &distributions, &mut digest);
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
     fn assert_bad_request(response: &str) {
         assert!(
             response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "unexpected response: {response}"
         );
+    }
+
+    #[test]
+    fn blocked_endpoints_serve_compact_geometry() {
+        let info = route_blocked("/api/info");
+        assert!(info.contains(r#"{"shape":[2,2,2],"ndim":3}"#));
+        let slice = route_blocked("/api/slice?c=1");
+        assert!(slice.contains(r#"{"rows":2,"cols":2,"distributions":["#));
     }
 
     #[test]

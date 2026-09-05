@@ -42,7 +42,10 @@ fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
 
 /// Probe `data` for a torch tensor. Returns `(data_ptr, numel, dtype_str)` on success,
 /// `None` if `data` is not a torch tensor, or an error for invalid torch tensors.
-fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, usize, String)>> {
+fn try_torch(
+    data: &Bound<'_, PyAny>,
+    input_numel: usize,
+) -> PyResult<Option<(usize, usize, String)>> {
     let Ok(ptr_obj) = data.call_method0("data_ptr") else {
         return Ok(None);
     };
@@ -65,9 +68,9 @@ fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, u
         ));
     }
     let n = data.call_method0("numel")?.extract::<usize>()?;
-    if n != numel {
+    if n != input_numel {
         return Err(PyValueError::new_err(format!(
-            "data element count {n} does not match numel {numel}"
+            "data element count {n} does not match input_numel {input_numel}"
         )));
     }
     Ok(Some((ptr, n, dtype_str)))
@@ -79,7 +82,7 @@ fn update_typed<T, K>(
     py: Python<'_>,
     d: &mut monatq::TensorDigest<T, K>,
     data: &Bound<'_, PyAny>,
-    numel: usize,
+    input_numel: usize,
     dtype_name: &'static str,
 ) -> PyResult<()>
 where
@@ -88,20 +91,20 @@ where
 {
     // Buffer protocol (numpy arrays)
     if let Ok(buf) = PyBuffer::<T>::get(data) {
-        if buf.item_count() != numel {
+        if buf.item_count() != input_numel {
             return Err(PyValueError::new_err(format!(
-                "data element count {} does not match numel {}",
+                "data element count {} does not match input_numel {}",
                 buf.item_count(),
-                numel,
+                input_numel,
             )));
         }
-        let mut vec = vec![T::default(); numel];
+        let mut vec = vec![T::default(); input_numel];
         buf.copy_to_slice(py, &mut vec)?;
         d.update(&vec).map_err(to_py_err)?;
         return Ok(());
     }
     // Torch tensor fast path
-    if let Some((ptr, n, dtype_str)) = try_torch(data, numel)? {
+    if let Some((ptr, n, dtype_str)) = try_torch(data, input_numel)? {
         if !dtype_str.contains(dtype_name) {
             return Err(PyValueError::new_err(format!(
                 "this digest uses dtype {dtype_name} but tensor dtype is {dtype_str}"
@@ -113,11 +116,11 @@ where
     }
     // Python list fallback
     let vec = data.extract::<Vec<T>>()?;
-    if vec.len() != numel {
+    if vec.len() != input_numel {
         return Err(PyValueError::new_err(format!(
-            "data length {} does not match numel {}",
+            "data length {} does not match input_numel {}",
             vec.len(),
-            numel,
+            input_numel,
         )));
     }
     d.update(&vec).map_err(to_py_err)?;
@@ -177,8 +180,20 @@ impl Inner {
     fn shape(&self) -> &[usize] {
         dispatch!(self, d => d.shape())
     }
-    fn numel(&self) -> usize {
-        dispatch!(self, d => d.numel())
+    fn input_shape(&self) -> &[usize] {
+        dispatch!(self, d => d.input_shape())
+    }
+    fn input_numel(&self) -> usize {
+        dispatch!(self, d => d.input_numel())
+    }
+    fn block_count(&self) -> usize {
+        dispatch!(self, d => d.block_count())
+    }
+    fn block_axis(&self) -> usize {
+        dispatch!(self, d => d.block_axis())
+    }
+    fn blocks_per_axis(&self) -> usize {
+        dispatch!(self, d => d.blocks_per_axis())
     }
     fn dtype(&self) -> &'static str {
         match self {
@@ -193,9 +208,9 @@ impl Inner {
         }
     }
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let numel = self.numel();
+        let input_numel = self.input_numel();
         let dtype = self.dtype();
-        dispatch!(self, d => update_typed(py, d, data, numel, dtype))
+        dispatch!(self, d => update_typed(py, d, data, input_numel, dtype))
     }
     fn flush(&mut self) {
         dispatch!(self, d => d.flush())
@@ -252,16 +267,39 @@ impl PyTensorDigest {
     /// no-op, because silently ignoring an accuracy knob is the kind of thing a caller only
     /// discovers from a bad result much later.
     #[new]
-    #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None))]
+    #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None, blocks_per_axis = None, block_axis = None))]
     fn new(
         shape: Vec<usize>,
         kernel: &str,
         compression: Option<usize>,
         buffer_capacity: Option<usize>,
         dtype: Option<&Bound<'_, PyAny>>,
+        blocks_per_axis: Option<usize>,
+        block_axis: Option<isize>,
     ) -> PyResult<Self> {
         let dtype = dtype.map(normalize_dtype).transpose()?.unwrap_or("float32");
         let kernel_name = kernel.trim().to_ascii_lowercase();
+        let blocks = if !shape.is_empty() || blocks_per_axis.is_some() || block_axis.is_some() {
+            let rank = isize::try_from(shape.len())
+                .map_err(|_| PyValueError::new_err("tensor rank is too large"))?;
+            let requested_axis = block_axis.unwrap_or(-1);
+            let axis = if requested_axis < 0 {
+                rank.checked_add(requested_axis)
+            } else {
+                Some(requested_axis)
+            };
+            let axis = axis
+                .filter(|&axis| axis >= 0 && axis < rank)
+                .ok_or_else(|| {
+                    PyValueError::new_err("block_axis must name an existing tensor axis")
+                })?;
+            Some(monatq::BlockConfig::new(
+                blocks_per_axis.unwrap_or(0),
+                axis as usize,
+            ))
+        } else {
+            None
+        };
 
         let reject = |knob: &str, owner: &str| {
             Err(PyValueError::new_err(format!(
@@ -281,10 +319,16 @@ impl PyTensorDigest {
                     None => monatq::RankKnotConfig::default(),
                 };
                 match dtype {
-                    "float32" => {
-                        Inner::RankKnotF32(monatq::TensorDigest::with_config(&shape, config))
-                    }
-                    _ => Inner::RankKnotI32(monatq::TensorDigest::with_config(&shape, config)),
+                    "float32" => Inner::RankKnotF32(match blocks {
+                        Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
+                            .map_err(to_py_err)?,
+                        None => monatq::TensorDigest::with_config(&shape, config),
+                    }),
+                    _ => Inner::RankKnotI32(match blocks {
+                        Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
+                            .map_err(to_py_err)?,
+                        None => monatq::TensorDigest::with_config(&shape, config),
+                    }),
                 }
             }
             "tdigest" => {
@@ -295,10 +339,16 @@ impl PyTensorDigest {
                     compression: compression.unwrap_or(100),
                 };
                 match dtype {
-                    "float32" => {
-                        Inner::TDigestF32(monatq::TensorDigest::with_config(&shape, config))
-                    }
-                    _ => Inner::TDigestI32(monatq::TensorDigest::with_config(&shape, config)),
+                    "float32" => Inner::TDigestF32(match blocks {
+                        Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
+                            .map_err(to_py_err)?,
+                        None => monatq::TensorDigest::with_config(&shape, config),
+                    }),
+                    _ => Inner::TDigestI32(match blocks {
+                        Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
+                            .map_err(to_py_err)?,
+                        None => monatq::TensorDigest::with_config(&shape, config),
+                    }),
                 }
             }
             other => {
@@ -321,13 +371,31 @@ impl PyTensorDigest {
     }
 
     #[getter]
-    fn numel(&self) -> usize {
-        self.inner.numel()
+    fn input_shape(&self) -> Vec<usize> {
+        self.inner.input_shape().to_vec()
+    }
+
+    #[getter]
+    fn input_numel(&self) -> usize {
+        self.inner.input_numel()
     }
 
     #[getter]
     fn dtype(&self) -> &str {
         self.inner.dtype()
+    }
+
+    #[getter]
+    fn block_count(&self) -> usize {
+        self.inner.block_count()
+    }
+    #[getter]
+    fn block_axis(&self) -> usize {
+        self.inner.block_axis()
+    }
+    #[getter]
+    fn blocks_per_axis(&self) -> usize {
+        self.inner.blocks_per_axis()
     }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {

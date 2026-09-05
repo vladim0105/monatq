@@ -1,3 +1,4 @@
+mod block;
 #[doc(hidden)]
 pub mod dev_support;
 pub mod distribution;
@@ -8,6 +9,7 @@ mod server;
 mod tensor_digest;
 pub mod tensor_value;
 
+pub use block::BlockConfig;
 pub use distribution::Distribution;
 pub use error::{Error, Result};
 pub use kernels::{DigestKernel, RankKnot, RankKnotConfig, TDigest, TDigestConfig};
@@ -55,7 +57,7 @@ impl AnyTensorDigest {
         }
     }
 
-    /// Shape of the tensor this digest tracks.
+    /// Compact row-major atomic-block shape used by queries and merges.
     pub fn shape(&self) -> &[usize] {
         match self {
             Self::TDigestF32(d) => d.shape(),
@@ -74,29 +76,40 @@ pub fn from_bytes(bytes: &[u8]) -> Result<AnyTensorDigest> {
     let payload = zstd::decode_all(bytes)
         .map_err(|e| Error::InvalidSnapshot(format!("not decodable: {e}")))?;
 
-    // RankKnot leads with its own kernel tag; ask it first, since t-digest snapshots lead
-    // with a bare dtype tag and so have no marker of their own to test for.
-    if let Some(dtype_tag) = kernels::rankknot::peek_dtype_tag(&payload) {
-        return match dtype_tag {
-            0 => TensorDigest::<f32, RankKnot>::from_payload(&payload)
-                .map(AnyTensorDigest::RankKnotF32),
-            1 => TensorDigest::<i32, RankKnot>::from_payload(&payload)
-                .map(AnyTensorDigest::RankKnotI32),
-            other => Err(Error::InvalidSnapshot(format!(
-                "RankKnot snapshot carries unknown dtype tag {other}"
-            ))),
-        };
-    }
-
     match payload.first().copied() {
-        Some(0) => {
-            TensorDigest::<f32, TDigest>::from_payload(&payload).map(AnyTensorDigest::TDigestF32)
+        Some(kernels::rankknot::RANK_KNOT_KERNEL_TAG) => {
+            let dtype_tag = kernels::rankknot::peek_dtype_tag(&payload).ok_or_else(|| {
+                Error::InvalidSnapshot("malformed RankKnot snapshot header".to_string())
+            })?;
+            match dtype_tag {
+                0 => TensorDigest::<f32, RankKnot>::from_payload(&payload)
+                    .map(AnyTensorDigest::RankKnotF32),
+                1 => TensorDigest::<i32, RankKnot>::from_payload(&payload)
+                    .map(AnyTensorDigest::RankKnotI32),
+                other => Err(Error::InvalidSnapshot(format!(
+                    "RankKnot snapshot carries unknown dtype tag {other}"
+                ))),
+            }
         }
-        Some(1) => {
-            TensorDigest::<i32, TDigest>::from_payload(&payload).map(AnyTensorDigest::TDigestI32)
+        Some(kernels::tdigest::TDIGEST_KERNEL_TAG) => {
+            let dtype_tag = kernels::tdigest::peek_dtype_tag(&payload).ok_or_else(|| {
+                Error::InvalidSnapshot("malformed TDigest snapshot header".to_string())
+            })?;
+            match dtype_tag {
+                0 => TensorDigest::<f32, TDigest>::from_payload(&payload)
+                    .map(AnyTensorDigest::TDigestF32),
+                1 => TensorDigest::<i32, TDigest>::from_payload(&payload)
+                    .map(AnyTensorDigest::TDigestI32),
+                other => Err(Error::InvalidSnapshot(format!(
+                    "TDigest snapshot carries unknown dtype tag {other}"
+                ))),
+            }
         }
-        Some(t) => Err(Error::InvalidSnapshot(format!(
-            "unrecognized snapshot: leading tag {t} matches no known kernel or dtype"
+        Some(tag @ (0 | 1)) => Err(Error::InvalidSnapshot(format!(
+            "unsupported legacy TDigest snapshot with bare dtype tag {tag}"
+        ))),
+        Some(tag) => Err(Error::InvalidSnapshot(format!(
+            "unrecognized snapshot: leading tag {tag} matches no known kernel"
         ))),
         None => Err(Error::InvalidSnapshot("empty payload".to_string())),
     }

@@ -478,7 +478,7 @@ fn snapshot_roundtrip_preserves_queries_extrema_and_count() {
         TensorDigest::<f32, RankKnot>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.numel(), original.numel());
+    assert_eq!(loaded.block_count(), original.block_count());
     assert_eq!(loaded.sample_count(), original.sample_count());
     assert_eq!(loaded.quantiles(&qs), expected);
     assert_eq!(loaded.min(), expected_min);

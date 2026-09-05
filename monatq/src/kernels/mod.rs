@@ -1,7 +1,9 @@
 pub(crate) mod rankknot;
 pub(crate) mod tdigest;
 
-use crate::{TensorValue, tensor_digest::StorageOperations};
+use crate::{
+    BlockConfig, Result, TensorValue, block::BlockLayout, tensor_digest::StorageOperations,
+};
 
 /// Marker selecting the T-Digest kernel.
 #[derive(Clone, Copy, Debug, Default)]
@@ -62,6 +64,25 @@ pub(crate) mod sealed {
 
         fn create_storage(
             shape: &[usize],
+            config: <Self as DigestKernel<T>>::Config,
+        ) -> Self::Storage
+        where
+            Self: DigestKernel<T>;
+
+        fn create_block_storage(
+            shape: &[usize],
+            config: <Self as DigestKernel<T>>::Config,
+            blocks: BlockConfig,
+        ) -> Result<Self::Storage>
+        where
+            Self: DigestKernel<T>,
+        {
+            let layout = BlockLayout::new(shape, blocks)?;
+            Ok(Self::create_storage_with_layout(layout, config))
+        }
+
+        fn create_storage_with_layout(
+            layout: BlockLayout,
             config: <Self as DigestKernel<T>>::Config,
         ) -> Self::Storage
         where

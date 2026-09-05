@@ -6,7 +6,7 @@ This document describes the current K32 Rust implementation. It is an implementa
 
 ## Status
 
-RankKnot implements the complete `TensorDigest` contract:
+RankKnot implements the complete `TensorDigest` contract with blocks as the atomic unit:
 
 - `f32` and `i32` ingestion;
 - per-position quantile queries and exact summary extrema;
@@ -76,15 +76,15 @@ Each position stores:
 | `min`, `max` | two `f32` values | 8 | Exact encoded endpoints |
 | **Total** |  | **208** | No per-position pointers or heap allocations |
 
-One `u64` sample count is shared by the containing storage because every position receives one observation per successful tensor update.
+Each statistical state also has an 8-byte `u64` observation counter. A separate storage-wide `u64` counts accepted tensor samples. These differ in blockwise mode: a block receives one observation per contained element per tensor sample. Balanced block sizes differ by at most one.
 
-The default input buffer holds 256 complete tensor rows. For `f32`, that adds 1,024 bytes per position while collecting. Worker-local sorting and merge vectors are temporary and scale with active Rayon work rather than tensor width.
+In element-wise mode, the default input buffer holds 256 complete tensor rows. For `f32`, that adds 1,024 bytes per position while collecting. Blockwise mode does not retain this buffer. Worker-local sorting and merge vectors are temporary and scale with the incoming batch or block size per active Rayon worker.
 
 Both supported input types are summarized at `f32` resolution. An `i32` magnitude above 2^24 may therefore round to the nearest representable `f32`; TDigest has the same crate-level output limitation.
 
 ## Update algorithm
 
-`update` first checks that the sample contains exactly `numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
+`update` first checks that the sample contains exactly `input_numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
 
 Setting `buffer_capacity` to `0` bypasses the input buffer and updates immediately on every sample.
 
@@ -99,7 +99,15 @@ When the buffer reaches a positive `buffer_capacity`, or a query explicitly flus
 7. Prefix-round cumulative probability onto the 0–65,535 mass scale using ties-to-even.
 8. Update the exact encoded extrema.
 
-With the default configuration, compression sees at most 256 new values plus 32 existing representatives per position.
+In element-wise mode with the default configuration, compression sees at most 256 new values plus 32 existing representatives per position.
+
+### Blockwise ingestion
+
+`TensorDigest::with_blocks(shape, BlockConfig::new(blocks_per_axis, axis))` partitions the selected axis into a requested number of balanced statistical blocks, independently for each combination of the other coordinates. Zero means elementwise. A positive count is clamped to the axis length. For axis length L and effective count B, the first L % B blocks have L / B + 1 elements and the remaining blocks have L / B elements. For L = 129 and B = 16, sizes are 9 followed by fifteen 8s.
+
+Groups never cross the other axes. Layouts with one element per block follow the existing element-wise buffering path. Pooled layouts bypass the row buffer and process every input block directly on each update. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
+
+`shape()` describes the atomic block grid and `block_count()` gives its total number of blocks. `input_shape()` and `input_numel()` describe the original input geometry used by ingestion. Bulk queries return one entry per block; cell queries and merge selections use flat block indices directly. Visualization displays the same block grid.
 
 ### Tail-companded boundaries
 
@@ -158,7 +166,7 @@ An empty state returns `0.0` for every probability. This check occurs before the
 4. Run the same compression routine used during ingestion.
 5. Union the exact extrema.
 
-All positions in one storage share the same sample count, so their encoded masses are already on a common scale. The merged sample count is the source sample count multiplied by the number of selected positions. A merged digest can continue accepting updates.
+Selected blocks are weighted by their individual observation counts, so blocks with different sizes contribute their proper population mass. A merged digest can continue accepting updates. Individual input elements cannot be separated back out of a pooled block.
 
 Merging is lossy because it recompresses approximate support. The initial measurements below are encouraging, but repeated merge-of-merge chains have not been characterized.
 
@@ -170,19 +178,19 @@ The storage-wide sample count is carried over unchanged because the number of no
 
 ## Snapshots
 
-Snapshots contain a RankKnot kernel tag, format version, knot count, mass scale, dtype, shape, sample count, and the flat state arrays. They are bincode-encoded and zstd-compressed.
+Snapshots contain a RankKnot kernel tag, format version, knot count, mass scale, dtype, tensor sample count, block layout (the sole source of input and block geometry), per-block observation counts, and the flat state arrays. They are bincode-encoded and zstd-compressed.
 
 Loading validates:
 
 - kernel, format, dtype, knot count, and mass scale;
-- array lengths against the shape;
+- block layout consistency and array lengths against the block count;
 - ascending active values;
 - absence of NaN knots; and
 - active masses summing to either zero or 65,535.
 
 `buffer_capacity` is deliberately not persisted because it changes ingestion behavior rather than the encoded distribution. A loaded digest starts with the default capacity.
 
-The current snapshot format revision is 1. Encoding constants are implementation details; a future build that changes them must reject incompatible snapshots rather than reinterpret their masses.
+The current snapshot format revision is 4, used for both element-wise and blockwise tracking. Earlier revisions are rejected; regenerate old snapshots. Encoding constants are implementation details; a future build that changes them must reject incompatible snapshots rather than reinterpret their masses.
 
 ## Invariants
 

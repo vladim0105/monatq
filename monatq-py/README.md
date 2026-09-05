@@ -53,6 +53,37 @@ Everything after `shape` is keyword-only. Code written against the previous
 `TensorDigest(shape, compression)` positional form needs
 `TensorDigest(shape, kernel="tdigest", compression=...)`.
 
+### Blockwise tracking
+
+For quantization, choose how many balanced groups to track along one axis:
+
+```python
+digest = TensorDigest(shape=[256, 129, 2], blocks_per_axis=16, block_axis=1)
+assert digest.input_shape == [256, 129, 2] # original input shape
+assert digest.shape == [256, 16, 2]       # atomic block grid
+assert digest.block_count == 8192
+```
+
+Along each axis-line, the first block pools 9 raw values and the remaining 15 pool 8 each.
+Both kernels support this. `blocks_per_axis=0` is the default and means elementwise;
+1 pools the whole selected axis. Counts above the axis length clamp to that length.
+`block_axis` defaults to the last axis and accepts negative indices. Blocks never cross
+other axes. Every raw value contributes—values are not averaged before tracking.
+
+The block count applies independently to each combination of the other coordinates, not
+to the tensor as a whole. For the example above, choosing `block_axis=-1` would clamp to
+2 blocks on the last axis and therefore produce elementwise tracking.
+
+`update` accepts the complete original tensor described by `input_shape` and `input_numel`.
+Every downstream operation uses blocks: quantile and analysis outputs contain one entry
+per block, cell queries accept flat block indices, and merge selections identify whole
+blocks. Merging uses actual observation counts, including unequal-sized blocks, and the
+visualizer displays the block grid.
+
+When blocks pool multiple elements, updates do not retain full tensor sample buffers.
+Elementwise layouts retain normal buffering, including when the requested count is at
+least the axis length. Snapshots preserve block settings.
+
 ### Snapshots
 
 ```python
@@ -61,6 +92,8 @@ restored = TensorDigest.from_bytes(blob)
 restored.kernel        # "rankknot"
 restored.dtype         # "float32"
 ```
+
+Only the current snapshot format is supported. Regenerate snapshots written by older builds.
 
 ### Sparse tensors
 

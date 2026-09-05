@@ -216,7 +216,7 @@ fn merge_cells_empty_selection_returns_empty_digest() {
 
     let mut merged = td.merge_cells(&[]).unwrap();
     assert_eq!(merged.shape(), &[1]);
-    assert_eq!(merged.numel(), 1);
+    assert_eq!(merged.block_count(), 1);
     assert_eq!(merged.quantile(0.5)[0], 0.0);
 }
 
@@ -308,7 +308,7 @@ fn multi_dim_shape() {
     let vals = samples(&dist, 2000);
 
     let mut td = TensorDigest::<_, monatq::TDigest>::new(&[2, 3]);
-    assert_eq!(td.numel(), 6);
+    assert_eq!(td.block_count(), 6);
     assert_eq!(td.shape(), &[2, 3]);
 
     for chunk in vals.chunks(6) {

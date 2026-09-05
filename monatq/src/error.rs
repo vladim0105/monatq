@@ -26,8 +26,8 @@ pub enum Error {
     #[error("tensor sample has {actual} elements but this digest tracks {expected}")]
     ShapeMismatch { expected: usize, actual: usize },
 
-    /// A flat tensor position was outside the digest.
-    #[error("position index {index} is out of bounds for {numel} tensor positions")]
+    /// A flat atomic-block index was outside the compact digest geometry.
+    #[error("block index {index} is out of bounds for {numel} atomic blocks")]
     IndexOutOfBounds { index: usize, numel: usize },
 
     /// A kernel configuration value was rejected at construction time.
@@ -103,7 +103,7 @@ impl From<Error> for std::io::Error {
     }
 }
 
-/// Validate a flat tensor position.
+/// Validate a flat atomic-block index.
 pub(crate) fn check_index(index: usize, numel: usize) -> Result<()> {
     if index < numel {
         Ok(())

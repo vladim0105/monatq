@@ -31,7 +31,7 @@ fn file_roundtrip() {
     std::fs::remove_file(&path).ok();
 
     assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.numel(), original.numel());
+    assert_eq!(loaded.block_count(), original.block_count());
     assert_eq!(loaded.quantiles(&[0.1, 0.5, 0.9]), expected);
 }
 
@@ -45,7 +45,7 @@ fn typed_f32_bytes_roundtrip() {
         TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.numel(), original.numel());
+    assert_eq!(loaded.block_count(), original.block_count());
     assert_eq!(loaded.quantiles(&[0.1, 0.5, 0.9]), expected);
 }
 
@@ -59,7 +59,7 @@ fn typed_i32_bytes_roundtrip() {
         TensorDigest::<i32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.numel(), original.numel());
+    assert_eq!(loaded.block_count(), original.block_count());
     assert_eq!(loaded.quantiles(&[0.25, 0.5, 0.75]), expected);
 }
 
@@ -232,5 +232,37 @@ fn a_payload_matching_no_kernel_is_rejected_with_a_useful_message() {
     assert!(
         error.to_string().contains("matches no known kernel"),
         "{error}"
+    );
+}
+
+#[test]
+fn obsolete_and_wrong_version_snapshots_are_rejected() {
+    for dtype_tag in [0_u8, 1] {
+        let old = zstd::encode_all(&[dtype_tag][..], 3).unwrap();
+        let error = monatq::from_bytes(&old).expect_err("bare dtype format must be rejected");
+        assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
+        assert!(error.to_string().contains("legacy TDigest"), "{error}");
+    }
+
+    // Tuples encode sequentially like the corresponding bincode struct headers. The loaders
+    // must reject the version before attempting to decode the omitted snapshot body.
+    let td_header = bincode2::serialize(&(0x54_u8, 2_u16, 0_u8)).unwrap();
+    let td_bytes = zstd::encode_all(td_header.as_slice(), 3).unwrap();
+    let td_error = monatq::from_bytes(&td_bytes).expect_err("wrong TDigest version must fail");
+    assert!(
+        td_error
+            .to_string()
+            .contains("unsupported TDigest snapshot version"),
+        "{td_error}"
+    );
+
+    let rk_header = bincode2::serialize(&(0x52_u8, 1_u16, 32_u32, u16::MAX as u64, 0_u8)).unwrap();
+    let rk_bytes = zstd::encode_all(rk_header.as_slice(), 3).unwrap();
+    let rk_error = monatq::from_bytes(&rk_bytes).expect_err("old RankKnot version must fail");
+    assert!(
+        rk_error
+            .to_string()
+            .contains("unsupported RankKnot snapshot version"),
+        "{rk_error}"
     );
 }

@@ -45,12 +45,55 @@ let [p10, p50, p90] = digest.quantiles(&[0.1, 0.5, 0.9])[..] else { panic!() };
 let distributions = digest.analyze()?;
 ```
 
+### Blockwise tracking for quantization
+
+Blockwise tracking pools all values in each group into one shared distribution instead of
+keeping independent statistics for every tensor element. `blocks_per_axis` controls the
+number of groups along one selected axis, independently for each combination of the other
+coordinates. **0 means elementwise**, **1 pools the entire axis**, and positive counts are
+clamped to the axis length to avoid empty blocks. Groups never cross the other axes.
+
+Groups are balanced: splitting 129 values into 16 blocks yields one block of 9 values and
+15 blocks of 8. Larger blocks come first; no values are padded or dropped.
+
+For weights shaped `[out_features, in_features]`, grouping along the last axis keeps each
+output channel independent. Values are **not averaged** before ingestion: outliers and
+repeated values contribute to the shared distribution. Tracking memory scales with the
+number of groups rather than the number of original elements; the input tensor itself is
+unchanged. Quantile results are compact, with one result per group rather than a broadcast
+copy for every input element.
+
+```rust
+use monatq::{BlockConfig, TensorDigest};
+
+// 16 blocks per output row, each pooling 256 weights.
+let mut digest = TensorDigest::<f32>::with_blocks(
+    &[4096, 4096], BlockConfig::new(16, 1),
+)?;
+assert_eq!(digest.shape(), &[4096, 16]);
+// update() still accepts the complete original tensor.
+```
+
+Use `with_block_config(shape, kernel_config, blocks)` to tune the kernel too.
+Blocks are the atomic unit: `shape()` describes the block grid and `block_count()` gives
+its total number of blocks. `input_shape()` and `input_numel()` describe the tensor
+accepted by `update`. Cell queries, `total_weight(idx)`, and merge selections all use flat
+**block indices**, never original element indices. `total_weight` counts a block's pooled
+observations.
+
+When blocks pool multiple elements, updates process the input directly without retaining
+full tensor sample buffers. Elementwise layouts—including a requested count at least as
+large as the axis—retain normal buffering. Scratch memory scales with block size per active
+worker. Block settings survive snapshot round-trips. Merging combines whole blocks using
+their observation counts, including unequal-sized blocks. The visualizer displays the block
+grid directly. Elementwise tracking is simply the special case of one-element blocks.
+
 ### Why RankKnot is the default
 
 RankKnot is a compact streaming rank summary designed for tensors with many independently
 tracked positions. For each position it retains at most 32 weighted `f32` knots, 16-bit
 probability masses, a mask for retained exact repeated-value intervals, and exact minimum
-and maximum sidecars. This summary state occupies **208 bytes per position**, compared with
+and maximum sidecars. The knot summary occupies **208 bytes per position**, plus an 8-byte observation counter, compared with
 approximately **4,900 bytes** for the default TDigest configuration. Updates are buffered in
 256-row batches and positions are compressed independently in parallel with Rayon.
 
@@ -88,7 +131,7 @@ round to the nearest representable value.
 ### Errors
 
 Fallible calls return `monatq::Result<T>`. Queries that cannot fail — `quantile`,
-`quantiles`, `flush`, `numel`, `shape` — stay infallible, so they need no `?`.
+`quantiles`, `flush`, `block_count`, `shape` — stay infallible, so they need no `?`.
 
 ```rust
 use monatq::{Error, TensorDigest};
@@ -131,7 +174,8 @@ println!("{} over {}", restored_any.kernel_name(), restored_any.dtype_name());
 in-memory snapshots are interchangeable. Snapshots are self-describing: `monatq::from_bytes`
 and `monatq::load` return an `AnyTensorDigest` identifying the kernel and element type, while
 the typed loaders still reject a snapshot written by a different kernel rather than
-reinterpreting its state.
+reinterpreting its state. Each kernel uses one current versioned format for both element-wise
+and blockwise tracking. Older snapshot formats are not supported; regenerate existing snapshots.
 
 ## Features
 
