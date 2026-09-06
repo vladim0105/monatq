@@ -102,9 +102,11 @@ In element-wise mode with the default configuration, compression sees at most 25
 
 ### Blockwise ingestion
 
-`TensorDigest::with_blocks(shape, BlockConfig::new(blocks_per_axis, axis))` partitions the selected axis into a requested number of balanced statistical blocks, independently for each combination of the other coordinates. Zero means elementwise. A positive count is clamped to the axis length. For axis length L and effective count B, the first L % B blocks have L / B + 1 elements and the remaining blocks have L / B elements. For L = 129 and B = 16, sizes are 9 followed by fifteen 8s.
+`TensorDigest::with_blocks(shape, BlockConfig::block_size(size, axis))` partitions the selected axis into fixed-width 1D groups, independently for each combination of the other coordinates. Size must be positive. The final group may be shorter; no padding is ingested. For axis length 129 and size 8, there are sixteen groups of 8 and a final group of 1. These are axis-local segments, not 2D tiles.
 
-Groups never cross the other axes. Layouts with one element per block follow the existing element-wise buffering path. Pooled layouts bypass the row buffer and process every input block directly on each update. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
+Alternatively, `BlockConfig::blocks_per_axis(count, axis)` requests balanced groups. Zero means elementwise. A positive count is clamped to the axis length. For axis length L and effective count B, the first L % B blocks have L / B + 1 elements and the remaining blocks have L / B elements. For L = 129 and B = 16, sizes are 9 followed by fifteen 8s. The older `BlockConfig::new(count, axis)` constructor is an alias for this mode.
+
+Axes are signed in both Rust and Python: `-1` selects the last input dimension. The shared Rust layout resolves and validates the axis once; queries and snapshots use the normalized nonnegative index. Groups never cross the other axes. Layouts with one element per block follow the existing element-wise buffering path. Pooled layouts bypass the row buffer and process every input block directly on each update. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
 
 `shape()` describes the atomic block grid and `block_count()` gives its total number of blocks. `input_shape()` and `input_numel()` describe the original input geometry used by ingestion. Bulk queries return one entry per block; cell queries and merge selections use flat block indices directly. Visualization displays the same block grid.
 

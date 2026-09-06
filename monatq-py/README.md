@@ -1,6 +1,6 @@
 # monatq (Python)
 
-Python bindings for [monatq](https://github.com/vladim0105/monatq) — approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates.
+Python bindings for [monatq](https://github.com/vladim0105/monatq) — approximate quantile tracking for tensors with element-wise or axis-local block updates.
 
 ## Installation
 
@@ -55,24 +55,51 @@ Everything after `shape` is keyword-only. Code written against the previous
 
 ### Blockwise tracking
 
-For quantization, choose how many balanced groups to track along one axis:
+Use `BlockConfig` to choose either a fixed size or a requested count of groups along one
+axis. The constructor is keyword-only and requires exactly one mode:
 
 ```python
-digest = TensorDigest(shape=[256, 129, 2], blocks_per_axis=16, block_axis=1)
-assert digest.input_shape == [256, 129, 2] # original input shape
-assert digest.shape == [256, 16, 2]       # atomic block grid
-assert digest.block_count == 8192
+from monatq import BlockConfig, TensorDigest
+
+# Fixed-size groups: 64, 64, then a short final group of 1.
+digest = TensorDigest(
+    shape=[256, 129, 2],
+    blocks=BlockConfig(block_size=64, axis=1),
+)
+assert digest.input_shape == [256, 129, 2]  # original input shape
+assert digest.shape == [256, 3, 2]          # atomic block grid
+assert digest.block_size == 64
+assert digest.blocks_per_axis == 3          # effective group count
+
+# A requested count instead makes balanced groups (9 values, then groups of 8).
+balanced = TensorDigest(
+    shape=[256, 129, 2],
+    blocks=BlockConfig(blocks_per_axis=16, axis=1),
+)
+assert balanced.shape == [256, 16, 2]
+assert balanced.block_size is None
+assert balanced.blocks_per_axis == 16       # requested count
 ```
 
-Along each axis-line, the first block pools 9 raw values and the remaining 15 pool 8 each.
-Both kernels support this. `blocks_per_axis=0` is the default and means elementwise;
-1 pools the whole selected axis. Counts above the axis length clamp to that length.
-`block_axis` defaults to the last axis and accepts negative indices. Blocks never cross
-other axes. Every raw value contributes—values are not averaged before tracking.
+Both kernels support both modes. `axis` defaults to `-1` and accepts negative indices,
+just like Rust's `BlockConfig`. The shared Rust layout resolves and validates the axis;
+`digest.block_axis` reports the resolved nonnegative index, including after snapshot loading.
+Blocks are one-dimensional and local to each axis-line: they never cross another axis.
+Every raw value contributes directly to its block digest; values are not averaged first.
+For fixed-size mode, the last group is shorter when the axis length has a remainder. For
+count mode, group lengths differ by at most one. Requested counts above the axis length
+produce elementwise groups, while `blocks_per_axis=0` explicitly selects elementwise
+tracking.
 
-The block count applies independently to each combination of the other coordinates, not
-to the tensor as a whole. For the example above, choosing `block_axis=-1` would clamp to
-2 blocks on the last axis and therefore produce elementwise tracking.
+The legacy `blocks_per_axis=` and `block_axis=` arguments remain supported. A convenience
+`block_size=` argument can likewise be paired with `block_axis=`:
+
+```python
+TensorDigest([256, 129, 2], block_size=64, block_axis=1)
+```
+
+Do not combine `blocks=...` with any legacy/convenience block arguments, or specify both
+size and count modes; conflicting inputs raise `ValueError`.
 
 `update` accepts the complete original tensor described by `input_shape` and `input_numel`.
 Every downstream operation uses blocks: quantile and analysis outputs contain one entry
@@ -81,8 +108,8 @@ blocks. Merging uses actual observation counts, including unequal-sized blocks, 
 visualizer displays the block grid.
 
 When blocks pool multiple elements, updates do not retain full tensor sample buffers.
-Elementwise layouts retain normal buffering, including when the requested count is at
-least the axis length. Snapshots preserve block settings.
+Elementwise layouts retain normal buffering. Snapshots preserve the block mode and its
+settings for both kernels.
 
 ### Snapshots
 

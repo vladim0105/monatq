@@ -20,7 +20,7 @@ const MASS_QUANTA: u64 = u16::MAX as u64;
 pub(crate) const RANK_KNOT_KERNEL_TAG: u8 = 0x52;
 
 /// Snapshot format revision. Bump whenever the field layout below changes.
-const RANK_KNOT_FORMAT_VERSION: u16 = 5;
+const RANK_KNOT_FORMAT_VERSION: u16 = 6;
 
 /// On-disk form of [`RankKnotStorage`].
 ///
@@ -593,6 +593,9 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     }
     fn blocks_per_axis(&self) -> usize {
         self.layout.blocks_per_axis()
+    }
+    fn block_size(&self) -> Option<usize> {
+        self.layout.block_size()
     }
 
     fn total_weight(&self, idx: usize) -> Result<u32> {

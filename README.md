@@ -48,13 +48,23 @@ let distributions = digest.analyze()?;
 ### Blockwise tracking for quantization
 
 Blockwise tracking pools all values in each group into one shared distribution instead of
-keeping independent statistics for every tensor element. `blocks_per_axis` controls the
-number of groups along one selected axis, independently for each combination of the other
-coordinates. **0 means elementwise**, **1 pools the entire axis**, and positive counts are
-clamped to the axis length to avoid empty blocks. Groups never cross the other axes.
+keeping independent statistics for every tensor element. Blocks are **1D groups along one
+selected axis**, independently for each combination of the other coordinates—not square
+or 2D tiles. Groups never cross the other axes.
 
-Groups are balanced: splitting 129 values into 16 blocks yields one block of 9 values and
-15 blocks of 8. Larger blocks come first; no values are padded or dropped.
+Choose the grouping explicitly with `BlockConfig`:
+
+- `BlockConfig::block_size(size, axis)`: fixed-width groups, matching common blockwise
+  quantization geometry. Size must be positive. A short final group holds the remainder:
+  129 values with size 8 gives 16 groups of 8 and one of 1. No padding enters statistics.
+- `BlockConfig::blocks_per_axis(count, axis)`: balanced groups. Splitting 129 values into
+  16 blocks gives one of 9 and 15 of 8. **0 means elementwise**, **1 pools the entire axis**,
+  and counts are clamped to the axis length. Larger groups come first.
+
+`BlockConfig::new(count, axis)` remains an alias for balanced count-based grouping.
+Both Rust and Python accept signed axes: `-1` is the last axis, `-2` the penultimate.
+Axes are resolved against the input shape; out-of-range axes are rejected.
+`block_axis()` (Python: `block_axis`) reports the resolved nonnegative index.
 
 For weights shaped `[out_features, in_features]`, grouping along the last axis keeps each
 output channel independent. Values are **not averaged** before ingestion: outliers and
@@ -68,7 +78,7 @@ use monatq::{BlockConfig, TensorDigest};
 
 // 16 blocks per output row, each pooling 256 weights.
 let mut digest = TensorDigest::<f32>::with_blocks(
-    &[4096, 4096], BlockConfig::new(16, 1),
+    &[4096, 4096], BlockConfig::block_size(256, -1),
 )?;
 assert_eq!(digest.shape(), &[4096, 16]);
 // update() still accepts the complete original tensor.
@@ -87,6 +97,11 @@ large as the axis—retain normal buffering. Scratch memory scales with block si
 worker. Block settings survive snapshot round-trips. Merging combines whole blocks using
 their observation counts, including unequal-sized blocks. The visualizer displays the block
 grid directly. Elementwise tracking is simply the special case of one-element blocks.
+`block_size()` reports the requested size (`None` in balanced mode); `blocks_per_axis()`
+reports the requested count in balanced mode and the effective count in size mode.
+
+The snapshot format now records the grouping mode. Older RankKnot v5 / TDigest v4
+snapshots must be regenerated; incompatible versions are rejected explicitly.
 
 ### Why RankKnot is the default
 

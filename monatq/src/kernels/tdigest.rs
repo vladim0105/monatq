@@ -39,7 +39,7 @@ pub struct TDigestStorage<T: TensorValue> {
 pub(crate) const TDIGEST_KERNEL_TAG: u8 = 0x54;
 
 /// Snapshot format revision. Bump whenever the field layout below changes.
-const TDIGEST_FORMAT_VERSION: u16 = 4;
+const TDIGEST_FORMAT_VERSION: u16 = 5;
 
 /// Persistent summary only. Borrow on save; deserialize into owned arrays on load.
 /// Ingestion workspace and capacities derived from compression are never serialized.
@@ -546,6 +546,9 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     }
     fn blocks_per_axis(&self) -> usize {
         self.layout.blocks_per_axis()
+    }
+    fn block_size(&self) -> Option<usize> {
+        self.layout.block_size()
     }
     fn total_weight(&self, idx: usize) -> crate::Result<u32> {
         crate::error::check_index(idx, self.layout.block_count())?;

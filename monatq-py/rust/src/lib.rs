@@ -195,6 +195,9 @@ impl Inner {
     fn blocks_per_axis(&self) -> usize {
         dispatch!(self, d => d.blocks_per_axis())
     }
+    fn block_size(&self) -> Option<usize> {
+        dispatch!(self, d => d.block_size())
+    }
     fn dtype(&self) -> &'static str {
         match self {
             Inner::TDigestF32(_) | Inner::RankKnotF32(_) => "float32",
@@ -252,6 +255,82 @@ impl Inner {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PyBlockMode {
+    Size(usize),
+    Count(usize),
+}
+
+/// Configuration for grouping one tensor axis into independent digest blocks.
+#[pyclass(name = "BlockConfig", frozen)]
+#[derive(Clone, Copy)]
+struct PyBlockConfig {
+    mode: PyBlockMode,
+    axis: isize,
+}
+
+impl PyBlockConfig {
+    fn into_rust(self) -> monatq::BlockConfig {
+        match self.mode {
+            PyBlockMode::Size(size) => monatq::BlockConfig::block_size(size, self.axis),
+            PyBlockMode::Count(count) => monatq::BlockConfig::blocks_per_axis(count, self.axis),
+        }
+    }
+}
+
+#[pymethods]
+impl PyBlockConfig {
+    #[new]
+    #[pyo3(signature = (*, block_size = None, blocks_per_axis = None, axis = -1))]
+    fn new(
+        block_size: Option<usize>,
+        blocks_per_axis: Option<usize>,
+        axis: isize,
+    ) -> PyResult<Self> {
+        let mode = match (block_size, blocks_per_axis) {
+            (Some(0), None) => {
+                return Err(PyValueError::new_err(
+                    "block_size must be greater than zero",
+                ));
+            }
+            (Some(size), None) => PyBlockMode::Size(size),
+            (None, Some(count)) => PyBlockMode::Count(count),
+            (None, None) => {
+                return Err(PyValueError::new_err(
+                    "exactly one of block_size or blocks_per_axis is required",
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "block_size and blocks_per_axis are mutually exclusive",
+                ));
+            }
+        };
+        Ok(Self { mode, axis })
+    }
+
+    #[getter]
+    fn block_size(&self) -> Option<usize> {
+        match self.mode {
+            PyBlockMode::Size(size) => Some(size),
+            PyBlockMode::Count(_) => None,
+        }
+    }
+
+    #[getter]
+    fn blocks_per_axis(&self) -> Option<usize> {
+        match self.mode {
+            PyBlockMode::Size(_) => None,
+            PyBlockMode::Count(count) => Some(count),
+        }
+    }
+
+    #[getter]
+    fn axis(&self) -> isize {
+        self.axis
+    }
+}
+
 #[pyclass(name = "TensorDigest")]
 struct PyTensorDigest {
     inner: Inner,
@@ -267,36 +346,37 @@ impl PyTensorDigest {
     /// no-op, because silently ignoring an accuracy knob is the kind of thing a caller only
     /// discovers from a bad result much later.
     #[new]
-    #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None, blocks_per_axis = None, block_axis = None))]
+    #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None, blocks = None, block_size = None, blocks_per_axis = None, block_axis = None))]
     fn new(
         shape: Vec<usize>,
         kernel: &str,
         compression: Option<usize>,
         buffer_capacity: Option<usize>,
         dtype: Option<&Bound<'_, PyAny>>,
+        blocks: Option<PyRef<'_, PyBlockConfig>>,
+        block_size: Option<usize>,
         blocks_per_axis: Option<usize>,
         block_axis: Option<isize>,
     ) -> PyResult<Self> {
         let dtype = dtype.map(normalize_dtype).transpose()?.unwrap_or("float32");
         let kernel_name = kernel.trim().to_ascii_lowercase();
-        let blocks = if !shape.is_empty() || blocks_per_axis.is_some() || block_axis.is_some() {
-            let rank = isize::try_from(shape.len())
-                .map_err(|_| PyValueError::new_err("tensor rank is too large"))?;
-            let requested_axis = block_axis.unwrap_or(-1);
-            let axis = if requested_axis < 0 {
-                rank.checked_add(requested_axis)
-            } else {
-                Some(requested_axis)
-            };
-            let axis = axis
-                .filter(|&axis| axis >= 0 && axis < rank)
-                .ok_or_else(|| {
-                    PyValueError::new_err("block_axis must name an existing tensor axis")
-                })?;
-            Some(monatq::BlockConfig::new(
-                blocks_per_axis.unwrap_or(0),
-                axis as usize,
-            ))
+
+        if blocks.is_some()
+            && (block_size.is_some() || blocks_per_axis.is_some() || block_axis.is_some())
+        {
+            return Err(PyValueError::new_err(
+                "blocks cannot be combined with block_size, blocks_per_axis, or block_axis",
+            ));
+        }
+        let block_config = if let Some(config) = blocks {
+            Some((*config).into_rust())
+        } else if !shape.is_empty()
+            || block_size.is_some()
+            || blocks_per_axis.is_some()
+            || block_axis.is_some()
+        {
+            let count = blocks_per_axis.or_else(|| block_size.is_none().then_some(0));
+            Some(PyBlockConfig::new(block_size, count, block_axis.unwrap_or(-1))?.into_rust())
         } else {
             None
         };
@@ -319,12 +399,12 @@ impl PyTensorDigest {
                     None => monatq::RankKnotConfig::default(),
                 };
                 match dtype {
-                    "float32" => Inner::RankKnotF32(match blocks {
+                    "float32" => Inner::RankKnotF32(match block_config {
                         Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
                             .map_err(to_py_err)?,
                         None => monatq::TensorDigest::with_config(&shape, config),
                     }),
-                    _ => Inner::RankKnotI32(match blocks {
+                    _ => Inner::RankKnotI32(match block_config {
                         Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
                             .map_err(to_py_err)?,
                         None => monatq::TensorDigest::with_config(&shape, config),
@@ -339,12 +419,12 @@ impl PyTensorDigest {
                     compression: compression.unwrap_or(100),
                 };
                 match dtype {
-                    "float32" => Inner::TDigestF32(match blocks {
+                    "float32" => Inner::TDigestF32(match block_config {
                         Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
                             .map_err(to_py_err)?,
                         None => monatq::TensorDigest::with_config(&shape, config),
                     }),
-                    _ => Inner::TDigestI32(match blocks {
+                    _ => Inner::TDigestI32(match block_config {
                         Some(b) => monatq::TensorDigest::with_block_config(&shape, config, b)
                             .map_err(to_py_err)?,
                         None => monatq::TensorDigest::with_config(&shape, config),
@@ -396,6 +476,10 @@ impl PyTensorDigest {
     #[getter]
     fn blocks_per_axis(&self) -> usize {
         self.inner.blocks_per_axis()
+    }
+    #[getter]
+    fn block_size(&self) -> Option<usize> {
+        self.inner.block_size()
     }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -510,6 +594,8 @@ impl PyTensorDigest {
 
 #[pymodule(name = "monatq")]
 mod _monatq {
+    #[pymodule_export]
+    use super::PyBlockConfig as BlockConfig;
     #[pymodule_export]
     use super::PyTensorDigest as TensorDigest;
 }

@@ -217,7 +217,7 @@ fn obsolete_and_wrong_version_snapshots_are_rejected() {
     }
 
     // Header-only payloads must reject incompatible versions before decoding the body.
-    for version in [0_u16, 3, 5, u16::MAX] {
+    for version in [0_u16, 3, 4, 6, u16::MAX] {
         let header = bincode2::serialize(&(0x54_u8, version, 0_u8)).unwrap();
         let bytes = zstd::encode_all(header.as_slice(), 3).unwrap();
         for error in [
@@ -233,7 +233,7 @@ fn obsolete_and_wrong_version_snapshots_are_rejected() {
             );
         }
     }
-    for version in [0_u16, 4, 6, u16::MAX] {
+    for version in [0_u16, 4, 5, 7, u16::MAX] {
         let header =
             bincode2::serialize(&(0x52_u8, version, 32_u32, u16::MAX as u64, 0_u8)).unwrap();
         let bytes = zstd::encode_all(header.as_slice(), 3).unwrap();

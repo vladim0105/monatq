@@ -3,11 +3,12 @@ Kernel selection, the RankKnot default, and the operations it newly supports.
 """
 
 import os
+import sys
 import tempfile
 
 import numpy as np
 import pytest
-from monatq import TensorDigest
+from monatq import BlockConfig, TensorDigest
 
 
 class TestKernelSelection:
@@ -65,14 +66,38 @@ class TestConfigKnobs:
         assert not hasattr(digest, "numel")
         assert not hasattr(digest, "block_shape")
 
+    def test_block_config_is_keyword_only_and_requires_one_mode(self):
+        with pytest.raises(TypeError):
+            BlockConfig(2)
+        with pytest.raises(ValueError, match="exactly one"):
+            BlockConfig()
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            BlockConfig(block_size=2, blocks_per_axis=2)
+        with pytest.raises(ValueError, match="greater than zero"):
+            BlockConfig(block_size=0)
+
+        by_size = BlockConfig(block_size=3, axis=-2)
+        assert by_size.block_size == 3
+        assert by_size.blocks_per_axis is None
+        assert by_size.axis == -2
+        by_count = BlockConfig(blocks_per_axis=4)
+        assert by_count.block_size is None
+        assert by_count.blocks_per_axis == 4
+        assert by_count.axis == -1
+
     @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
-    def test_block_pooling_exposes_atomic_block_geometry(self, kernel):
-        td = TensorDigest([2, 5, 2], kernel=kernel, blocks_per_axis=2, block_axis=1)
+    def test_balanced_count_blocks_expose_atomic_geometry(self, kernel):
+        td = TensorDigest(
+            [2, 5, 2],
+            kernel=kernel,
+            blocks=BlockConfig(blocks_per_axis=2, axis=1),
+        )
         assert td.shape == [2, 2, 2]
         assert td.block_count == 8
         assert td.input_shape == [2, 5, 2]
         assert td.input_numel == 20
         assert td.blocks_per_axis == 2
+        assert td.block_size is None
         assert td.block_axis == 1
         for step in range(3):
             row = np.arange(20, dtype=np.float32) + step * 100
@@ -85,41 +110,98 @@ class TestConfigKnobs:
             td.cell_quantiles(td.block_count, [0.5])
 
     @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    def test_fixed_size_blocks_keep_short_final_group(self, kernel):
+        td = TensorDigest([2, 5], kernel=kernel, blocks=BlockConfig(block_size=2))
+        assert td.shape == [2, 3]
+        assert td.blocks_per_axis == 3
+        assert td.block_size == 2
+        assert td.block_axis == 1
+        td.update(np.arange(10, dtype=np.float32).reshape(2, 5))
+        assert td.quantile(0.0) == [0.0, 2.0, 4.0, 5.0, 7.0, 9.0]
+        assert td.quantile(1.0) == [1.0, 3.0, 4.0, 6.0, 8.0, 9.0]
+
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
     @pytest.mark.parametrize("dtype", ["float32", "int32"])
-    def test_default_and_negative_block_axes_and_snapshot(self, kernel, dtype):
-        td = TensorDigest([2, 5], kernel=kernel, dtype=dtype, blocks_per_axis=2)
-        negative = TensorDigest(
-            [2, 5], kernel=kernel, dtype=dtype, blocks_per_axis=2, block_axis=-1
-        )
-        assert td.shape == negative.shape == [2, 2]
+    @pytest.mark.parametrize(
+        ("config", "expected_shape", "expected_count", "expected_size"),
+        [
+            (BlockConfig(blocks_per_axis=2), [2, 2], 2, None),
+            (BlockConfig(block_size=2), [2, 3], 3, 2),
+        ],
+    )
+    def test_block_modes_and_snapshot(
+        self, kernel, dtype, config, expected_shape, expected_count, expected_size
+    ):
+        td = TensorDigest([2, 5], kernel=kernel, dtype=dtype, blocks=config)
+        assert td.shape == expected_shape
         row = np.arange(10, dtype=dtype).reshape(2, 5)
         td.update(row)
         restored = TensorDigest.from_bytes(td.to_bytes())
         restored.update(row + 10)
-        assert restored.blocks_per_axis == 2
+        assert restored.blocks_per_axis == expected_count
+        assert restored.block_size == expected_size
         assert restored.block_axis == 1
-        assert restored.quantile(1.0) == [12.0, 14.0, 17.0, 19.0]
-        assert TensorDigest([2, 5], block_axis=-2).blocks_per_axis == 0
+        assert restored.quantile(1.0)[-1] == 19.0
 
-    def test_requested_block_count_modes_and_scalar_default(self):
+    def test_legacy_and_convenience_block_arguments(self):
         assert TensorDigest([]).blocks_per_axis == 0
         default = TensorDigest([2, 5])
         assert default.blocks_per_axis == 0
+        assert default.block_size is None
         assert default.block_axis == 1
         assert TensorDigest([2, 5], blocks_per_axis=0).shape == [2, 5]
         whole = TensorDigest([2, 5], blocks_per_axis=1)
         clamped = TensorDigest([2, 5], blocks_per_axis=99)
+        sized = TensorDigest([2, 5], block_size=2, block_axis=-1)
         assert whole.shape == [2, 1]
         assert clamped.shape == [2, 5]
         assert clamped.blocks_per_axis == 99
-        with pytest.raises(TypeError):
-            TensorDigest([2, 5], block_size=2)
+        assert sized.shape == [2, 3]
+        assert sized.block_size == 2
+
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    @pytest.mark.parametrize("mode", ["block_size", "blocks_per_axis"])
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    def test_signed_axes_share_rust_layout(self, kernel, mode, axis):
+        shape = [2, 5, 3]
+        positive = TensorDigest(shape, kernel=kernel, blocks=BlockConfig(**{mode: 2}, axis=axis))
+        negative = TensorDigest(shape, kernel=kernel, blocks=BlockConfig(**{mode: 2}, axis=axis - 3))
+        shorthand = TensorDigest(shape, kernel=kernel, **{mode: 2}, block_axis=axis - 3)
+        row = np.arange(30, dtype=np.float32).reshape(shape)
+        for digest in [positive, negative, shorthand]:
+            digest.update(row)
+            assert digest.block_axis == axis
+        assert positive.to_bytes() == negative.to_bytes() == shorthand.to_bytes()
+        assert TensorDigest.from_bytes(negative.to_bytes()).block_axis == axis
+
+    @pytest.mark.parametrize("axis", [-sys.maxsize - 1, -4, 3, sys.maxsize])
+    def test_invalid_signed_axes(self, axis):
+        with pytest.raises(ValueError, match="block axis"):
+            TensorDigest([2, 5, 3], blocks=BlockConfig(block_size=2, axis=axis))
+        with pytest.raises(ValueError, match="block axis"):
+            TensorDigest([2, 5, 3], blocks_per_axis=2, block_axis=axis)
+
+    @pytest.mark.parametrize("axis", [-1, 0])
+    def test_scalar_has_no_explicit_block_axis(self, axis):
+        with pytest.raises(ValueError, match="block axis"):
+            TensorDigest([], blocks=BlockConfig(block_size=2, axis=axis))
+        assert TensorDigest([]).block_count == 1
 
     def test_block_arguments_are_validated(self):
-        with pytest.raises(ValueError, match="block_axis"):
+        with pytest.raises(ValueError, match="block axis"):
             TensorDigest([2, 3], blocks_per_axis=2, block_axis=-3)
-        with pytest.raises(ValueError, match="block_axis"):
+        with pytest.raises(ValueError, match="block axis"):
             TensorDigest([2, 3], blocks_per_axis=2, block_axis=2)
+        with pytest.raises(ValueError, match="axis"):
+            TensorDigest([2, 3], blocks=BlockConfig(block_size=2, axis=2))
+        with pytest.raises(ValueError, match="greater than zero"):
+            TensorDigest([2, 3], block_size=0)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            TensorDigest([2, 3], block_size=2, blocks_per_axis=2)
+        with pytest.raises(ValueError, match="cannot be combined"):
+            TensorDigest(
+                [2, 3], blocks=BlockConfig(block_size=2), block_axis=1
+            )
         td = TensorDigest([2, 3], blocks_per_axis=0, block_axis=1)
         assert td.shape == [2, 3]
         assert td.blocks_per_axis == 0
