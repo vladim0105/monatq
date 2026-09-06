@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::mem;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
@@ -16,13 +17,7 @@ use crate::{
 ///
 /// All centroid storage lives in contiguous arrays owned by this struct.
 /// Element `e` occupies `centroids_*[e * max_centroids .. e * max_centroids + n_centroids[e]]`.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(
-    serialize = "T: serde::Serialize",
-    deserialize = "T: serde::de::DeserializeOwned"
-))]
 pub struct TDigestStorage<T: TensorValue> {
-    dtype_tag: u8,
     layout: BlockLayout,
     compression: usize,
 
@@ -42,23 +37,29 @@ pub struct TDigestStorage<T: TensorValue> {
 }
 
 pub(crate) const TDIGEST_KERNEL_TAG: u8 = 0x54;
-const TDIGEST_FORMAT_VERSION: u16 = 3;
 
-#[derive(serde::Serialize)]
-struct TDigestSnapshotRef<'a, T: TensorValue> {
+/// Snapshot format revision. Bump whenever the field layout below changes.
+const TDIGEST_FORMAT_VERSION: u16 = 4;
+
+/// Persistent summary only. Borrow on save; deserialize into owned arrays on load.
+/// Ingestion workspace and capacities derived from compression are never serialized.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "T: serde::Serialize",
+    deserialize = "T: serde::de::DeserializeOwned"
+))]
+struct TDigestSnapshot<'a, T: TensorValue> {
     kernel_tag: u8,
     format_version: u16,
     dtype_tag: u8,
-    storage: &'a TDigestStorage<T>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
-struct TDigestSnapshot<T: TensorValue> {
-    kernel_tag: u8,
-    format_version: u16,
-    dtype_tag: u8,
-    storage: TDigestStorage<T>,
+    layout: Cow<'a, BlockLayout>,
+    compression: usize,
+    centroids_means: Cow<'a, [f32]>,
+    centroids_weights: Cow<'a, [u32]>,
+    n_centroids: Cow<'a, [usize]>,
+    total_weights: Cow<'a, [u32]>,
+    mins: Cow<'a, [T]>,
+    maxs: Cow<'a, [T]>,
 }
 
 /// Leading fields shared by every TDigest snapshot.
@@ -96,7 +97,6 @@ impl<T: TensorValue> TDigestStorage<T> {
             0
         };
         Self {
-            dtype_tag: T::DTYPE_TAG,
             layout,
             compression,
             row_buffer: vec![T::min_sentinel(); row_len],
@@ -368,11 +368,18 @@ impl<T: TensorValue> TDigestStorage<T> {
         T: serde::Serialize,
     {
         self.flush();
-        let payload = bincode2::serialize(&TDigestSnapshotRef {
+        let payload = bincode2::serialize(&TDigestSnapshot {
             kernel_tag: TDIGEST_KERNEL_TAG,
             format_version: TDIGEST_FORMAT_VERSION,
             dtype_tag: T::DTYPE_TAG,
-            storage: self,
+            layout: Cow::Borrowed(&self.layout),
+            compression: self.compression,
+            centroids_means: Cow::Borrowed(&self.centroids_means),
+            centroids_weights: Cow::Borrowed(&self.centroids_weights),
+            n_centroids: Cow::Borrowed(&self.n_centroids),
+            total_weights: Cow::Borrowed(&self.total_weights),
+            mins: Cow::Borrowed(&self.mins),
+            maxs: Cow::Borrowed(&self.maxs),
         })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         zstd::encode_all(payload.as_slice(), 3).map_err(std::io::Error::other)
@@ -422,22 +429,8 @@ impl<T: TensorValue> TDigestStorage<T> {
                 ),
             ));
         }
-        let snapshot: TDigestSnapshot<T> = bincode2::deserialize(payload)
+        let loaded: TDigestSnapshot<T> = bincode2::deserialize(payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        debug_assert_eq!(snapshot.kernel_tag, header.kernel_tag);
-        debug_assert_eq!(snapshot.format_version, header.format_version);
-        debug_assert_eq!(snapshot.dtype_tag, header.dtype_tag);
-        let loaded = snapshot.storage;
-        if loaded.dtype_tag != T::DTYPE_TAG {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "dtype mismatch: snapshot contains tag {} but expected {}",
-                    loaded.dtype_tag,
-                    T::DTYPE_TAG
-                ),
-            ));
-        }
         loaded
             .layout
             .validate()
@@ -455,17 +448,9 @@ impl<T: TensorValue> TDigestStorage<T> {
             .checked_mul(6)
             .and_then(|value| value.checked_add(10))
             .ok_or_else(|| invalid("snapshot compression overflows centroid capacity"))?;
-        if loaded.buffer_capacity != expected_buffer_capacity
-            || loaded.max_centroids != expected_max_centroids
-        {
-            return Err(invalid(
-                "snapshot capacities are inconsistent with compression",
-            ));
-        }
-
         let states = loaded.layout.block_count();
         let centroid_slots = states
-            .checked_mul(loaded.max_centroids)
+            .checked_mul(expected_max_centroids)
             .ok_or_else(|| invalid("snapshot centroid array length overflows usize"))?;
         if loaded.n_centroids.len() != states
             || loaded.total_weights.len() != states
@@ -479,24 +464,34 @@ impl<T: TensorValue> TDigestStorage<T> {
         if loaded
             .n_centroids
             .iter()
-            .any(|&count| count > loaded.max_centroids)
+            .any(|&count| count > expected_max_centroids)
         {
             return Err(invalid("snapshot centroid count exceeds capacity"));
         }
 
-        if loaded.layout.is_elementwise() {
-            let row_slots = loaded
+        let row_slots = if loaded.layout.is_elementwise() {
+            loaded
                 .layout
                 .input_numel()
-                .checked_mul(loaded.buffer_capacity)
-                .ok_or_else(|| invalid("snapshot row buffer length overflows usize"))?;
-            if loaded.row_buffer.len() != row_slots || loaded.n_buffered >= loaded.buffer_capacity {
-                return Err(invalid("snapshot row buffer metadata is inconsistent"));
-            }
-        } else if !loaded.row_buffer.is_empty() || loaded.n_buffered != 0 {
-            return Err(invalid("blocked snapshot must not contain buffered rows"));
-        }
-        Ok(loaded)
+                .checked_mul(expected_buffer_capacity)
+                .ok_or_else(|| invalid("snapshot row buffer length overflows usize"))?
+        } else {
+            0
+        };
+        Ok(Self {
+            layout: loaded.layout.into_owned(),
+            compression: loaded.compression,
+            buffer_capacity: expected_buffer_capacity,
+            max_centroids: expected_max_centroids,
+            row_buffer: vec![T::min_sentinel(); row_slots],
+            n_buffered: 0,
+            centroids_means: loaded.centroids_means.into_owned(),
+            centroids_weights: loaded.centroids_weights.into_owned(),
+            n_centroids: loaded.n_centroids.into_owned(),
+            total_weights: loaded.total_weights.into_owned(),
+            mins: loaded.mins.into_owned(),
+            maxs: loaded.maxs.into_owned(),
+        })
     }
 
     /// Number of atomic blocks per channel in compact block geometry.
@@ -1008,7 +1003,7 @@ mod tests {
         assert_eq!(td.n_buffered, 0);
     }
 
-    fn current_snapshot() -> TDigestSnapshot<f32> {
+    fn current_snapshot() -> TDigestSnapshot<'static, f32> {
         let mut storage = TDigestStorage::<f32>::new(&[2], 10);
         storage.update(&[1.0, 2.0]);
         let bytes = storage.to_bytes().unwrap();
@@ -1016,16 +1011,13 @@ mod tests {
         bincode2::deserialize(&payload).unwrap()
     }
 
-    fn assert_rejected(tamper: impl FnOnce(&mut TDigestSnapshot<f32>), expected_fragment: &str) {
+    fn assert_rejected(
+        tamper: impl FnOnce(&mut TDigestSnapshot<'static, f32>),
+        expected_fragment: &str,
+    ) {
         let mut snapshot = current_snapshot();
         tamper(&mut snapshot);
-        let payload = bincode2::serialize(&TDigestSnapshotRef {
-            kernel_tag: snapshot.kernel_tag,
-            format_version: snapshot.format_version,
-            dtype_tag: snapshot.dtype_tag,
-            storage: &snapshot.storage,
-        })
-        .unwrap();
+        let payload = bincode2::serialize(&snapshot).unwrap();
         let Err(error) = TDigestStorage::<f32>::from_payload(&payload) else {
             panic!("tampered snapshot must be rejected");
         };
@@ -1042,47 +1034,89 @@ mod tests {
             |snapshot| snapshot.format_version += 1,
             "unsupported TDigest snapshot version",
         );
-        assert_rejected(|snapshot| snapshot.storage.compression = 0, "compression");
-        assert_rejected(|snapshot| snapshot.storage.max_centroids = 0, "capacities");
         assert_rejected(
-            |snapshot| snapshot.storage.n_centroids[0] = snapshot.storage.max_centroids + 1,
+            |snapshot| snapshot.kernel_tag ^= 0xff,
+            "not a TDigest snapshot",
+        );
+        assert_rejected(|snapshot| snapshot.dtype_tag = 1, "dtype mismatch");
+        assert_rejected(|snapshot| snapshot.compression = 0, "compression");
+        assert_rejected(
+            |snapshot| snapshot.compression = usize::MAX,
+            "buffer capacity",
+        );
+        assert_rejected(
+            |snapshot| snapshot.compression = usize::MAX / 6,
+            "centroid capacity",
+        );
+        assert_rejected(
+            |snapshot| snapshot.n_centroids.to_mut()[0] = snapshot.compression * 6 + 11,
             "centroid count",
         );
         assert_rejected(
-            |snapshot| snapshot.storage.n_buffered = snapshot.storage.buffer_capacity + 1,
-            "row buffer metadata",
-        );
-        assert_rejected(
-            |snapshot| {
-                snapshot.storage.compression = (usize::MAX - 10) / 6;
-                snapshot.storage.buffer_capacity = snapshot.storage.compression * 2;
-                snapshot.storage.max_centroids = snapshot.storage.compression * 6 + 10;
-            },
+            |snapshot| snapshot.compression = (usize::MAX - 10) / 6,
             "centroid array length overflows",
+        );
+        for array in 0..6 {
+            assert_rejected(
+                |snapshot| match array {
+                    0 => {
+                        snapshot.centroids_means.to_mut().pop();
+                    }
+                    1 => {
+                        snapshot.centroids_weights.to_mut().pop();
+                    }
+                    2 => {
+                        snapshot.n_centroids.to_mut().pop();
+                    }
+                    3 => {
+                        snapshot.total_weights.to_mut().pop();
+                    }
+                    4 => {
+                        snapshot.mins.to_mut().pop();
+                    }
+                    _ => {
+                        snapshot.maxs.to_mut().pop();
+                    }
+                },
+                "arrays do not match block layout",
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_omits_stale_workspace_and_rebuilds_it_on_load() {
+        let mut storage = TDigestStorage::<f32>::new(&[2], 10);
+        for step in 0..27 {
+            storage.update(&[step as f32, -(step as f32)]);
+        }
+        let bytes = storage.to_bytes().unwrap();
+        assert_eq!(storage.n_buffered, 0);
+        assert!(storage.row_buffer.iter().any(|value| value.is_finite()));
+
+        // Saving the same summary must not depend on stale input values in the workspace.
+        storage.row_buffer.fill(f32::NAN);
+        assert_eq!(storage.to_bytes().unwrap(), bytes);
+        let mut restored = TDigestStorage::<f32>::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.buffer_capacity, 20);
+        assert_eq!(restored.max_centroids, 70);
+        assert_eq!(restored.n_buffered, 0);
+        assert_eq!(restored.row_buffer, vec![f32::INFINITY; 40]);
+        assert_eq!(
+            restored.quantiles(&[0.0, 0.5, 1.0]),
+            storage.quantiles(&[0.0, 0.5, 1.0])
         );
     }
 
     #[test]
-    fn blocked_snapshot_rejects_buffered_rows() {
+    fn blocked_snapshot_load_does_not_allocate_row_workspace() {
         let layout = BlockLayout::new(&[4], crate::BlockConfig::new(2, 0)).unwrap();
         let mut storage = TDigestStorage::<f32>::with_layout(layout, 10);
+        storage.update(&[1.0, 2.0, 3.0, 4.0]);
         let bytes = storage.to_bytes().unwrap();
-        let payload = zstd::decode_all(bytes.as_slice()).unwrap();
-        let mut snapshot: TDigestSnapshot<f32> = bincode2::deserialize(&payload).unwrap();
-        snapshot.storage.row_buffer.push(1.0);
-        snapshot.storage.n_buffered = 1;
-        let payload = bincode2::serialize(&TDigestSnapshotRef {
-            kernel_tag: snapshot.kernel_tag,
-            format_version: snapshot.format_version,
-            dtype_tag: snapshot.dtype_tag,
-            storage: &snapshot.storage,
-        })
-        .unwrap();
-        let Err(error) = TDigestStorage::<f32>::from_payload(&payload) else {
-            panic!("tampered snapshot must be rejected");
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("must not contain buffered rows"));
+        let restored = TDigestStorage::<f32>::from_bytes(&bytes).unwrap();
+        assert!(restored.row_buffer.is_empty());
+        assert_eq!(restored.n_buffered, 0);
+        assert_eq!(restored.layout, storage.layout);
     }
 
     #[test]

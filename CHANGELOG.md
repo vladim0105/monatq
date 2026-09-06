@@ -78,9 +78,9 @@ Notable changes to `monatq` are documented in this file.
 - Added the read-only `kernel` property.
 - Rust errors are translated to catchable Python exceptions, including `ValueError`, `IndexError`, `NotImplementedError`, and `IOError`.
 
-### Snapshot migration
+### Snapshots
 
-The Rust generic default is now RankKnot. To load a TDigest snapshot created by the 0.2 default, name its kernel explicitly:
+The Rust generic default is now RankKnot. To load a current-format TDigest snapshot with the typed loader, name its kernel explicitly:
 
 ```rust
 use monatq::{TDigest, TensorDigest};

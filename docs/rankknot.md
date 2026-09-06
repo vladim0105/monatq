@@ -12,7 +12,6 @@ RankKnot implements the complete `TensorDigest` contract with blocks as the atom
 - per-position quantile queries and exact summary extrema;
 - cell, channel, and tensor-wide merging;
 - distribution analysis and zero filtering;
-- versioned snapshots; and
 - the optional HTTP visualizer.
 
 The public default is:
@@ -178,11 +177,11 @@ The storage-wide sample count is carried over unchanged because the number of no
 
 ## Snapshots
 
-Snapshots contain a RankKnot kernel tag, format version, knot count, mass scale, dtype, tensor sample count, block layout (the sole source of input and block geometry), per-block observation counts, and the flat state arrays. They are bincode-encoded and zstd-compressed.
+Snapshots contain a RankKnot kernel tag, format version, knot count, mass scale, dtype, tensor sample count, block layout (the sole source of input and block geometry), per-block observation counts, and a vector of per-block states. Each state directly encodes its 32 values, 32 masses, purity mask, and extrema; no flattening into parallel vectors is needed. Snapshots are bincode-encoded and zstd-compressed.
 
 Loading validates:
 
-- kernel, format, dtype, knot count, and mass scale;
+- kernel, format version, dtype, knot count, and mass scale;
 - block layout consistency and array lengths against the block count;
 - ascending active values;
 - absence of NaN knots; and
@@ -190,7 +189,7 @@ Loading validates:
 
 `buffer_capacity` is deliberately not persisted because it changes ingestion behavior rather than the encoded distribution. A loaded digest starts with the default capacity.
 
-The current snapshot format revision is 4, used for both element-wise and blockwise tracking. Earlier revisions are rejected; regenerate old snapshots. Encoding constants are implementation details; a future build that changes them must reject incompatible snapshots rather than reinterpret their masses.
+The current snapshot format revision is 5, used for both element-wise and blockwise tracking. Earlier revisions are rejected; regenerate old snapshots. Encoding constants are validated so incompatible knot counts or mass scales cannot silently change the meaning of a summary.
 
 ## Invariants
 
@@ -226,7 +225,7 @@ Approximate costs are:
 | One tensor-wide quantile | `O(P × K)`, parallel over positions | Output vector |
 | Cell quantiles | `O(number of probabilities × K)` | Output vector |
 | Merge `M` positions | `O(MK log(MK))` | `O(MK)` temporary support |
-| Snapshot encode/decode | `O(PK)` | Flat serialized arrays |
+| Snapshot encode/decode | `O(PK)` | Encoded payload and decoded states; no intermediate flattened arrays |
 
 `K` is fixed in the current implementation, but it is shown explicitly to describe the algorithm rather than only its present constant factors.
 

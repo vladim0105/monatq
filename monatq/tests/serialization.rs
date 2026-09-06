@@ -36,34 +36,6 @@ fn file_roundtrip() {
 }
 
 #[test]
-fn typed_f32_bytes_roundtrip() {
-    let mut original = make_f32_digest();
-    let expected = original.quantiles(&[0.1, 0.5, 0.9]);
-
-    let bytes = original.to_bytes().expect("serialization failed");
-    let mut loaded =
-        TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
-
-    assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.block_count(), original.block_count());
-    assert_eq!(loaded.quantiles(&[0.1, 0.5, 0.9]), expected);
-}
-
-#[test]
-fn typed_i32_bytes_roundtrip() {
-    let mut original = make_i32_digest();
-    let expected = original.quantiles(&[0.25, 0.5, 0.75]);
-
-    let bytes = original.to_bytes().expect("serialization failed");
-    let mut loaded =
-        TensorDigest::<i32, monatq::TDigest>::from_bytes(&bytes).expect("deserialization failed");
-
-    assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.block_count(), original.block_count());
-    assert_eq!(loaded.quantiles(&[0.25, 0.5, 0.75]), expected);
-}
-
-#[test]
 fn runtime_dtype_autodetection_from_bytes() {
     let mut f32_digest = make_f32_digest();
     let f32_bytes = f32_digest.to_bytes().expect("f32 serialization failed");
@@ -244,25 +216,119 @@ fn obsolete_and_wrong_version_snapshots_are_rejected() {
         assert!(error.to_string().contains("legacy TDigest"), "{error}");
     }
 
-    // Tuples encode sequentially like the corresponding bincode struct headers. The loaders
-    // must reject the version before attempting to decode the omitted snapshot body.
-    let td_header = bincode2::serialize(&(0x54_u8, 2_u16, 0_u8)).unwrap();
-    let td_bytes = zstd::encode_all(td_header.as_slice(), 3).unwrap();
-    let td_error = monatq::from_bytes(&td_bytes).expect_err("wrong TDigest version must fail");
-    assert!(
-        td_error
-            .to_string()
-            .contains("unsupported TDigest snapshot version"),
-        "{td_error}"
-    );
+    // Header-only payloads must reject incompatible versions before decoding the body.
+    for version in [0_u16, 3, 5, u16::MAX] {
+        let header = bincode2::serialize(&(0x54_u8, version, 0_u8)).unwrap();
+        let bytes = zstd::encode_all(header.as_slice(), 3).unwrap();
+        for error in [
+            monatq::from_bytes(&bytes).unwrap_err(),
+            TensorDigest::<f32, monatq::TDigest>::from_bytes(&bytes).unwrap_err(),
+        ] {
+            assert!(error.is_invalid_snapshot(), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported TDigest snapshot version"),
+                "{error}"
+            );
+        }
+    }
+    for version in [0_u16, 4, 6, u16::MAX] {
+        let header =
+            bincode2::serialize(&(0x52_u8, version, 32_u32, u16::MAX as u64, 0_u8)).unwrap();
+        let bytes = zstd::encode_all(header.as_slice(), 3).unwrap();
+        for error in [
+            monatq::from_bytes(&bytes).unwrap_err(),
+            TensorDigest::<f32>::from_bytes(&bytes).unwrap_err(),
+        ] {
+            assert!(error.is_invalid_snapshot(), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported RankKnot snapshot version"),
+                "{error}"
+            );
+        }
+    }
+}
 
-    let rk_header = bincode2::serialize(&(0x52_u8, 1_u16, 32_u32, u16::MAX as u64, 0_u8)).unwrap();
-    let rk_bytes = zstd::encode_all(rk_header.as_slice(), 3).unwrap();
-    let rk_error = monatq::from_bytes(&rk_bytes).expect_err("old RankKnot version must fail");
-    assert!(
-        rk_error
-            .to_string()
-            .contains("unsupported RankKnot snapshot version"),
-        "{rk_error}"
-    );
+#[test]
+fn truncated_payloads_are_rejected_by_both_loaders() {
+    let mut td = make_f32_digest();
+    let mut rk = TensorDigest::<f32>::new(&[2]);
+    rk.update(&[1.0, 2.0]).unwrap();
+    for bytes in [td.to_bytes().unwrap(), rk.to_bytes().unwrap()] {
+        let payload = zstd::decode_all(bytes.as_slice()).unwrap();
+        // Recompress truncated payloads so decoding reaches the snapshot parser rather
+        // than just rejecting a broken zstd stream.
+        for len in [1, payload.len() / 2, payload.len() - 1] {
+            let truncated = zstd::encode_all(&payload[..len], 3).unwrap();
+            let error = monatq::from_bytes(&truncated).expect_err("truncated payload loaded");
+            assert!(error.is_invalid_snapshot(), "unexpected error: {error}");
+        }
+    }
+}
+
+fn assert_roundtrip_continuation<T, K>()
+where
+    T: monatq::TensorValue + serde::Serialize + serde::de::DeserializeOwned,
+    K: monatq::DigestKernel<T>,
+{
+    for (shape, blocks) in [
+        (&[5, 2][..], None),
+        (&[5, 2][..], Some(monatq::BlockConfig::new(2, 0))),
+        (&[][..], None),
+        (&[0, 2][..], None),
+    ] {
+        for initial_samples in [0, 37] {
+            let mut original = match blocks {
+                Some(blocks) => TensorDigest::<T, K>::with_blocks(shape, blocks).unwrap(),
+                None => TensorDigest::<T, K>::new(shape),
+            };
+            let row = |step: usize| {
+                (0..shape.iter().product())
+                    .map(|index| T::from_f32(((step * 7 + index * 11) % 53) as f32 - 26.0))
+                    .collect::<Vec<_>>()
+            };
+            for step in 0..initial_samples {
+                original.update(&row(step)).unwrap();
+            }
+            let bytes = original.to_bytes().unwrap();
+            let mut restored = TensorDigest::<T, K>::from_bytes(&bytes).unwrap();
+            assert_eq!(restored.shape(), original.shape());
+            assert_eq!(restored.block_count(), original.block_count());
+            assert_eq!(restored.input_shape(), original.input_shape());
+            assert_eq!(restored.input_numel(), original.input_numel());
+            assert_eq!(restored.block_axis(), original.block_axis());
+            assert_eq!(restored.blocks_per_axis(), original.blocks_per_axis());
+            assert_eq!(restored.to_bytes().unwrap(), bytes);
+
+            // Loading must restore query results before any further ingestion.
+            let qs = &[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
+            assert_eq!(restored.quantiles(qs), original.quantiles(qs));
+
+            // Cross the default buffer boundary in both kernels after restoring.
+            for step in initial_samples..initial_samples + 270 {
+                let values = row(step);
+                original.update(&values).unwrap();
+                restored.update(&values).unwrap();
+            }
+            assert_eq!(restored.quantiles(qs), original.quantiles(qs));
+            for index in 0..original.block_count() {
+                assert_eq!(
+                    restored.total_weight(index).unwrap(),
+                    original.total_weight(index).unwrap()
+                );
+            }
+            assert_eq!(restored.to_bytes().unwrap(), original.to_bytes().unwrap());
+        }
+    }
+}
+
+#[test]
+fn snapshots_restore_query_state_and_continuable_storage_for_all_types_and_layouts() {
+    assert_roundtrip_continuation::<f32, monatq::TDigest>();
+    assert_roundtrip_continuation::<i32, monatq::TDigest>();
+    assert_roundtrip_continuation::<f32, monatq::RankKnot>();
+    assert_roundtrip_continuation::<i32, monatq::RankKnot>();
 }

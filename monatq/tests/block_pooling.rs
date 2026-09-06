@@ -47,8 +47,6 @@ fn exercise_blocks<K: monatq::DigestKernel<f32>>(mut d: TensorDigest<f32, K>) {
     assert_eq!(d.block_count(), 8);
     assert_eq!(d.input_shape(), &[2, 5, 2]);
     assert_eq!(d.input_numel(), 20);
-    assert_eq!(d.shape(), &[2, 2, 2]);
-    assert_eq!(d.block_count(), 8);
     assert_eq!(d.block_axis(), 1);
     assert_eq!(d.blocks_per_axis(), 2);
     for step in 0..2 {
@@ -109,8 +107,6 @@ fn scalar_snapshots_remain_supported() {
 fn zero_axis<K: monatq::DigestKernel<f32>>() {
     let mut digest =
         TensorDigest::<f32, K>::with_blocks(&[2, 0, 3], BlockConfig::new(16, 1)).unwrap();
-    assert_eq!(digest.shape(), &[2, 0, 3]);
-    assert_eq!(digest.block_count(), 0);
     assert_eq!(digest.shape(), &[2, 0, 3]);
     assert_eq!(digest.block_count(), 0);
     digest.update(&[]).unwrap();
@@ -192,8 +188,6 @@ fn assert_large_balanced_layout<K: monatq::DigestKernel<f32>>() {
     assert_eq!(digest.block_count(), 256 * 16 * 2);
     assert_eq!(digest.input_shape(), &shape);
     assert_eq!(digest.input_numel(), 256 * 129 * 2);
-    assert_eq!(digest.shape(), &[256, 16, 2]);
-    assert_eq!(digest.block_count(), 256 * 16 * 2);
 
     let mut row = vec![0.0; digest.input_numel()];
     for outer in 0..256 {

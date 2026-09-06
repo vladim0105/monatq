@@ -174,8 +174,10 @@ println!("{} over {}", restored_any.kernel_name(), restored_any.dtype_name());
 in-memory snapshots are interchangeable. Snapshots are self-describing: `monatq::from_bytes`
 and `monatq::load` return an `AnyTensorDigest` identifying the kernel and element type, while
 the typed loaders still reject a snapshot written by a different kernel rather than
-reinterpreting its state. Each kernel uses one current versioned format for both element-wise
-and blockwise tracking. Older snapshot formats are not supported; regenerate existing snapshots.
+reinterpreting its state. Each kernel uses one current versioned format for both element-wise and
+blockwise tracking. Older snapshot formats are rejected; regenerate existing snapshots.
+Snapshots contain summary state, not ingestion workspace: TDigest reconstructs its row buffer
+and derived capacities on load, while RankKnot stores its per-block states directly.
 
 ## Features
 
