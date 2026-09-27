@@ -31,7 +31,7 @@ pub(crate) fn serve_until<T: TensorValue, S: StorageOperations<T>>(
     // Fail before binding the port if this kernel cannot analyse: reporting `Unsupported`
     // immediately is far better than serving a window that errors on every request.
     let distributions = digest.analyze()?;
-    let shape = digest.shape().to_vec();
+    let shape = digest.block_shape().to_vec();
 
     let listener = TcpListener::bind(&addr).map_err(crate::Error::Io)?;
     listener.set_nonblocking(true).map_err(crate::Error::Io)?;
@@ -449,7 +449,7 @@ mod tests {
             crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::new(2, 1)).unwrap();
         let mut digest = TDigestStorage::<f32>::with_layout(layout, 100, 200);
         digest.update(&(0..20).map(|value| value as f32).collect::<Vec<_>>());
-        let shape = <TDigestStorage<f32> as StorageOperations<f32>>::shape(&digest).to_vec();
+        let shape = <TDigestStorage<f32> as StorageOperations<f32>>::block_shape(&digest).to_vec();
         let distributions = digest.analyze();
         handle(&server, &shape, &distributions, &mut digest);
         drop(server);

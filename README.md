@@ -80,14 +80,16 @@ use monatq::{BlockConfig, TensorDigest};
 let mut digest = TensorDigest::<f32>::with_blocks(
     &[4096, 4096], BlockConfig::block_size(256, -1),
 )?;
-assert_eq!(digest.shape(), &[4096, 16]);
-// update() still accepts the complete original tensor.
+assert_eq!(digest.shape(), &[4096, 4096]); // update() accepts the original tensor
+assert_eq!(digest.block_shape(), &[4096, 16]); // query results follow the block grid
 ```
 
 Use `with_block_config(shape, kernel_config, blocks)` to tune the kernel too.
-Blocks are the atomic unit: `shape()` describes the block grid and `block_count()` gives
-its total number of blocks. `input_shape()` and `input_numel()` describe the tensor
-accepted by `update`. Cell queries, `total_weight(idx)`, and merge selections all use flat
+`shape()` and `numel()` always describe the tensor accepted by `update`, exactly as passed
+at construction. Blocks are the atomic unit of everything else: `block_shape()` describes
+the block grid and `block_count()` gives its total number of blocks. Quantile and analysis
+results have `block_count()` entries in `block_shape()` row-major order. For an elementwise
+digest the two shapes are equal. Cell queries, `total_weight(idx)`, and merge selections all use flat
 **block indices**, never original element indices. `total_weight` counts a block's pooled
 observations.
 
@@ -97,8 +99,8 @@ grid directly. Elementwise tracking is simply the special case of one-element bl
 `block_size()` reports the requested size (`None` in balanced mode); `blocks_per_axis()`
 reports the requested count in balanced mode and the effective count in size mode.
 
-The snapshot format now records the grouping mode. Older RankKnot v5 / TDigest v4
-snapshots must be regenerated; incompatible versions are rejected explicitly.
+The snapshot format now records the grouping mode. Snapshots written by monatq 0.3.0 or
+earlier must be regenerated; incompatible versions are rejected explicitly.
 
 ### Buffering and memory
 
@@ -115,7 +117,7 @@ Total memory is approximately
 block_count × (S + 4 × buffer_capacity) bytes
 ```
 
-where `block_count ≈ input_numel / block_len`, `S` is 216 bytes for RankKnot and about
+where `block_count ≈ numel / block_len`, `S` is 216 bytes for RankKnot and about
 `48 × compression + 100` bytes (≈4,900) for TDigest, and the buffer term is zero when no
 buffer is allocated. This excludes the caller's input tensor and per-worker scratch. For a
 `[128256, 4096]` embedding tracked with RankKnot, elementwise tracking with the default

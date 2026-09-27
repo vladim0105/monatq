@@ -297,8 +297,8 @@ where
             let mut restored = TensorDigest::<T, K>::from_bytes(&bytes).unwrap();
             assert_eq!(restored.shape(), original.shape());
             assert_eq!(restored.block_count(), original.block_count());
-            assert_eq!(restored.input_shape(), original.input_shape());
-            assert_eq!(restored.input_numel(), original.input_numel());
+            assert_eq!(restored.block_shape(), original.block_shape());
+            assert_eq!(restored.numel(), original.numel());
             assert_eq!(restored.block_axis(), original.block_axis());
             assert_eq!(restored.blocks_per_axis(), original.blocks_per_axis());
             assert_eq!(restored.to_bytes().unwrap(), bytes);

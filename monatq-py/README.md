@@ -70,8 +70,8 @@ digest = TensorDigest(
     shape=[256, 129, 2],
     blocks=BlockConfig(block_size=64, axis=1),
 )
-assert digest.input_shape == [256, 129, 2]  # original input shape
-assert digest.shape == [256, 3, 2]          # atomic block grid
+assert digest.shape == [256, 129, 2]        # original input shape
+assert digest.block_shape == [256, 3, 2]    # atomic block grid
 assert digest.block_size == 64
 assert digest.blocks_per_axis == 3          # effective group count
 
@@ -80,7 +80,7 @@ balanced = TensorDigest(
     shape=[256, 129, 2],
     blocks=BlockConfig(blocks_per_axis=16, axis=1),
 )
-assert balanced.shape == [256, 16, 2]
+assert balanced.block_shape == [256, 16, 2]
 assert balanced.block_size is None
 assert balanced.blocks_per_axis == 16       # requested count
 ```
@@ -105,9 +105,10 @@ TensorDigest([256, 129, 2], block_size=64, block_axis=1)
 Do not combine `blocks=...` with any legacy/convenience block arguments, or specify both
 size and count modes; conflicting inputs raise `ValueError`.
 
-`update` accepts the complete original tensor described by `input_shape` and `input_numel`.
-Every downstream operation uses blocks: quantile and analysis outputs contain one entry
-per block, cell queries accept flat block indices, and merge selections identify whole
+`update` accepts the complete original tensor described by `shape` and `numel`, which
+always report the shape passed at construction. Every downstream operation uses blocks:
+quantile and analysis outputs contain one entry per block (`block_count` entries, in
+`block_shape` row-major order), cell queries accept flat block indices, and merge selections identify whole
 blocks. Merging uses actual observation counts, including unequal-sized blocks, and the
 visualizer displays the block grid.
 

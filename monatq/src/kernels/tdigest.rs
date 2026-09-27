@@ -538,13 +538,13 @@ impl<T: TensorValue> TDigestStorage<T> {
 
 impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     fn shape(&self) -> &[usize] {
-        self.layout.shape()
+        self.layout.input_shape()
     }
-    fn input_numel(&self) -> usize {
+    fn numel(&self) -> usize {
         self.layout.input_numel()
     }
-    fn input_shape(&self) -> &[usize] {
-        self.layout.input_shape()
+    fn block_shape(&self) -> &[usize] {
+        self.layout.shape()
     }
     fn block_count(&self) -> usize {
         self.layout.block_count()
@@ -1014,14 +1014,6 @@ fn quantile_from_centroids(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn digest(shape: &[usize], compression: usize) -> TDigestStorage<f32> {
-        TDigestStorage::with_layout(
-            BlockLayout::default_for(shape),
-            compression,
-            compression * 2,
-        )
-    }
 
     fn digest(shape: &[usize], compression: usize) -> TDigestStorage<f32> {
         TDigestStorage::with_layout(

@@ -57,13 +57,23 @@ impl AnyTensorDigest {
         }
     }
 
-    /// Compact row-major atomic-block shape used by queries and merges.
+    /// Shape of the tensors the digest ingests, as passed at construction.
     pub fn shape(&self) -> &[usize] {
         match self {
             Self::TDigestF32(d) => d.shape(),
             Self::TDigestI32(d) => d.shape(),
             Self::RankKnotF32(d) => d.shape(),
             Self::RankKnotI32(d) => d.shape(),
+        }
+    }
+
+    /// Compact row-major atomic-block shape used by queries and merges.
+    pub fn block_shape(&self) -> &[usize] {
+        match self {
+            Self::TDigestF32(d) => d.block_shape(),
+            Self::TDigestI32(d) => d.block_shape(),
+            Self::RankKnotF32(d) => d.block_shape(),
+            Self::RankKnotI32(d) => d.block_shape(),
         }
     }
 }

@@ -576,13 +576,13 @@ impl<T: TensorValue> DigestKernel<T> for RankKnot {
 
 impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     fn shape(&self) -> &[usize] {
-        self.layout.shape()
+        self.layout.input_shape()
     }
-    fn input_numel(&self) -> usize {
+    fn numel(&self) -> usize {
         self.layout.input_numel()
     }
-    fn input_shape(&self) -> &[usize] {
-        self.layout.input_shape()
+    fn block_shape(&self) -> &[usize] {
+        self.layout.shape()
     }
     fn block_count(&self) -> usize {
         self.layout.block_count()

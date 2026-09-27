@@ -4,7 +4,7 @@ fn exercise<K: DigestKernel<f32>>() {
     // Strided groups: each of the two inner coordinates remains independent.
     let mut d =
         TensorDigest::<f32, K>::with_blocks(&[2, 5, 2], BlockConfig::block_size(2, 1)).unwrap();
-    assert_eq!(d.shape(), &[2, 3, 2]);
+    assert_eq!(d.block_shape(), &[2, 3, 2]);
     assert_eq!(d.block_size(), Some(2));
     assert_eq!(d.blocks_per_axis(), 3);
     let values: Vec<f32> = (0..20).map(|x| x as f32).collect();
@@ -24,6 +24,8 @@ fn exercise<K: DigestKernel<f32>>() {
     let mut restored = TensorDigest::<f32, K>::from_bytes(&d.to_bytes().unwrap()).unwrap();
     assert_eq!(restored.block_size(), Some(2));
     assert_eq!(restored.shape(), d.shape());
+    assert_eq!(restored.block_shape(), d.block_shape());
+    assert_eq!(restored.block_shape(), d.block_shape());
     restored.update(&values).unwrap();
     restored.flush();
     assert_eq!(restored.total_weight(4).unwrap(), 3);
@@ -33,11 +35,11 @@ fn exercise<K: DigestKernel<f32>>() {
 
     let tail =
         TensorDigest::<f32, K>::with_blocks(&[32, 257], BlockConfig::block_size(128, 1)).unwrap();
-    assert_eq!(tail.shape(), &[32, 3]);
+    assert_eq!(tail.block_shape(), &[32, 3]);
     for size in [1, 5, 99, usize::MAX] {
         let d =
             TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::block_size(size, 1)).unwrap();
-        assert_eq!(d.shape(), &[2, 5usize.div_ceil(size)]);
+        assert_eq!(d.block_shape(), &[2, 5usize.div_ceil(size)]);
     }
     assert!(TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::block_size(0, 1)).is_err());
     assert!(TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::block_size(2, 2)).is_err());

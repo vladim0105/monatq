@@ -42,10 +42,7 @@ fn normalize_dtype(obj: &Bound<'_, PyAny>) -> PyResult<&'static str> {
 
 /// Probe `data` for a torch tensor. Returns `(data_ptr, numel, dtype_str)` on success,
 /// `None` if `data` is not a torch tensor, or an error for invalid torch tensors.
-fn try_torch(
-    data: &Bound<'_, PyAny>,
-    input_numel: usize,
-) -> PyResult<Option<(usize, usize, String)>> {
+fn try_torch(data: &Bound<'_, PyAny>, numel: usize) -> PyResult<Option<(usize, usize, String)>> {
     let Ok(ptr_obj) = data.call_method0("data_ptr") else {
         return Ok(None);
     };
@@ -68,9 +65,9 @@ fn try_torch(
         ));
     }
     let n = data.call_method0("numel")?.extract::<usize>()?;
-    if n != input_numel {
+    if n != numel {
         return Err(PyValueError::new_err(format!(
-            "data element count {n} does not match input_numel {input_numel}"
+            "data element count {n} does not match numel {numel}"
         )));
     }
     Ok(Some((ptr, n, dtype_str)))
@@ -82,7 +79,7 @@ fn update_typed<T, K>(
     py: Python<'_>,
     d: &mut monatq::TensorDigest<T, K>,
     data: &Bound<'_, PyAny>,
-    input_numel: usize,
+    numel: usize,
     dtype_name: &'static str,
 ) -> PyResult<()>
 where
@@ -91,20 +88,20 @@ where
 {
     // Buffer protocol (numpy arrays)
     if let Ok(buf) = PyBuffer::<T>::get(data) {
-        if buf.item_count() != input_numel {
+        if buf.item_count() != numel {
             return Err(PyValueError::new_err(format!(
-                "data element count {} does not match input_numel {}",
+                "data element count {} does not match numel {}",
                 buf.item_count(),
-                input_numel,
+                numel,
             )));
         }
-        let mut vec = vec![T::default(); input_numel];
+        let mut vec = vec![T::default(); numel];
         buf.copy_to_slice(py, &mut vec)?;
         d.update(&vec).map_err(to_py_err)?;
         return Ok(());
     }
     // Torch tensor fast path
-    if let Some((ptr, n, dtype_str)) = try_torch(data, input_numel)? {
+    if let Some((ptr, n, dtype_str)) = try_torch(data, numel)? {
         if !dtype_str.contains(dtype_name) {
             return Err(PyValueError::new_err(format!(
                 "this digest uses dtype {dtype_name} but tensor dtype is {dtype_str}"
@@ -116,11 +113,11 @@ where
     }
     // Python list fallback
     let vec = data.extract::<Vec<T>>()?;
-    if vec.len() != input_numel {
+    if vec.len() != numel {
         return Err(PyValueError::new_err(format!(
-            "data length {} does not match input_numel {}",
+            "data length {} does not match numel {}",
             vec.len(),
-            input_numel,
+            numel,
         )));
     }
     d.update(&vec).map_err(to_py_err)?;
@@ -180,11 +177,11 @@ impl Inner {
     fn shape(&self) -> &[usize] {
         dispatch!(self, d => d.shape())
     }
-    fn input_shape(&self) -> &[usize] {
-        dispatch!(self, d => d.input_shape())
+    fn numel(&self) -> usize {
+        dispatch!(self, d => d.numel())
     }
-    fn input_numel(&self) -> usize {
-        dispatch!(self, d => d.input_numel())
+    fn block_shape(&self) -> &[usize] {
+        dispatch!(self, d => d.block_shape())
     }
     fn block_count(&self) -> usize {
         dispatch!(self, d => d.block_count())
@@ -211,9 +208,9 @@ impl Inner {
         }
     }
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {
-        let input_numel = self.input_numel();
+        let numel = self.numel();
         let dtype = self.dtype();
-        dispatch!(self, d => update_typed(py, d, data, input_numel, dtype))
+        dispatch!(self, d => update_typed(py, d, data, numel, dtype))
     }
     fn flush(&mut self) {
         dispatch!(self, d => d.flush())
@@ -449,13 +446,13 @@ impl PyTensorDigest {
     }
 
     #[getter]
-    fn input_shape(&self) -> Vec<usize> {
-        self.inner.input_shape().to_vec()
+    fn numel(&self) -> usize {
+        self.inner.numel()
     }
 
     #[getter]
-    fn input_numel(&self) -> usize {
-        self.inner.input_numel()
+    fn block_shape(&self) -> Vec<usize> {
+        self.inner.block_shape().to_vec()
     }
 
     #[getter]

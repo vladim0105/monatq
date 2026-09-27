@@ -85,7 +85,7 @@ Both supported input types are summarized at `f32` resolution. An `i32` magnitud
 
 ## Update algorithm
 
-`update` first checks that the sample contains exactly `input_numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
+`update` first checks that the sample contains exactly `numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
 
 When no buffer is allocated, each sample is compressed immediately. Otherwise, when the buffer is full, or a query explicitly flushes it, each block is processed independently in parallel:
 
@@ -108,7 +108,7 @@ Alternatively, `BlockConfig::blocks_per_axis(count, axis)` requests balanced gro
 
 Axes are signed in both Rust and Python: `-1` selects the last input dimension. The shared Rust layout resolves and validates the axis once; queries and snapshots use the normalized nonnegative index. Groups never cross the other axes. Buffering follows the same rule for every block length, as described above. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
 
-`shape()` describes the atomic block grid and `block_count()` gives its total number of blocks. `input_shape()` and `input_numel()` describe the original input geometry used by ingestion. Bulk queries return one entry per block; cell queries and merge selections use flat block indices directly. Visualization displays the same block grid.
+`shape()` and `numel()` describe the original input geometry used by ingestion, exactly as passed at construction. `block_shape()` describes the atomic block grid and `block_count()` gives its total number of blocks. Bulk queries return one entry per block; cell queries and merge selections use flat block indices directly. Visualization displays the same block grid.
 
 ### Tail-companded boundaries
 

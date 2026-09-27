@@ -11,8 +11,8 @@ use crate::{
 /// public container can provide one statically dispatched implementation of its common API.
 pub(crate) trait StorageOperations<T: TensorValue>: Sized {
     fn shape(&self) -> &[usize];
-    fn input_numel(&self) -> usize;
-    fn input_shape(&self) -> &[usize];
+    fn numel(&self) -> usize;
+    fn block_shape(&self) -> &[usize];
     fn block_count(&self) -> usize;
     fn block_axis(&self) -> usize;
     fn blocks_per_axis(&self) -> usize;
@@ -73,7 +73,7 @@ impl<T: TensorValue, K: DigestKernel<T>> std::fmt::Debug for TensorDigest<T, K> 
         formatter
             .debug_struct("TensorDigest")
             .field("shape", &self.shape())
-            .field("block_count", &self.block_count())
+            .field("block_shape", &self.block_shape())
             .finish_non_exhaustive()
     }
 }
@@ -111,22 +111,27 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
         }
     }
 
-    /// Compact row-major atomic-block shape used by queries, selections, and merges.
+    /// Shape of the tensors accepted by [`Self::update`], as passed at construction.
+    ///
+    /// For a blocked digest, query results follow [`Self::block_shape`] instead.
     pub fn shape(&self) -> &[usize] {
         self.storage.shape()
     }
 
-    /// Number of values required by each ingestion update.
-    pub fn input_numel(&self) -> usize {
-        self.storage.input_numel()
+    /// Total number of elements (the product of the shape dimensions).
+    pub fn numel(&self) -> usize {
+        self.storage.numel()
     }
 
-    /// Original tensor shape required by ingestion.
-    pub fn input_shape(&self) -> &[usize] {
-        self.storage.input_shape()
+    /// Compact row-major atomic-block shape used by queries, selections, and merges.
+    ///
+    /// Equal to [`Self::shape`] for an elementwise digest.
+    pub fn block_shape(&self) -> &[usize] {
+        self.storage.block_shape()
     }
 
-    /// Number of independently tracked statistical blocks.
+    /// Number of independently tracked statistical blocks (the product of
+    /// [`Self::block_shape`]).
     pub fn block_count(&self) -> usize {
         self.storage.block_count()
     }
@@ -155,7 +160,7 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     /// Add one row-major tensor sample.
     ///
     /// Fails with [`crate::Error::ShapeMismatch`] if `data` does not have exactly
-    /// [`Self::input_numel`] elements. The digest is left untouched in that case.
+    /// [`Self::numel`] elements. The digest is left untouched in that case.
     ///
     /// NaN input is a documented precondition rather than a checked one: it is not rejected
     /// here and will panic during compression (during update in direct/block mode, otherwise

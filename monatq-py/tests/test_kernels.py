@@ -60,9 +60,11 @@ class TestConfigKnobs:
     def test_shape_is_still_positional(self):
         digest = TensorDigest([2, 3])
         assert digest.shape == [2, 3]
+        assert digest.numel == 6
+        assert digest.block_shape == [2, 3]
         assert digest.block_count == 6
-        assert not hasattr(digest, "numel")
-        assert not hasattr(digest, "block_shape")
+        assert not hasattr(digest, "input_shape")
+        assert not hasattr(digest, "input_numel")
 
     def test_block_config_is_keyword_only_and_requires_one_mode(self):
         with pytest.raises(TypeError):
@@ -90,10 +92,10 @@ class TestConfigKnobs:
             kernel=kernel,
             blocks=BlockConfig(blocks_per_axis=2, axis=1),
         )
-        assert td.shape == [2, 2, 2]
+        assert td.shape == [2, 5, 2]
+        assert td.numel == 20
+        assert td.block_shape == [2, 2, 2]
         assert td.block_count == 8
-        assert td.input_shape == [2, 5, 2]
-        assert td.input_numel == 20
         assert td.blocks_per_axis == 2
         assert td.block_size is None
         assert td.block_axis == 1
@@ -110,7 +112,8 @@ class TestConfigKnobs:
     @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
     def test_fixed_size_blocks_keep_short_final_group(self, kernel):
         td = TensorDigest([2, 5], kernel=kernel, blocks=BlockConfig(block_size=2))
-        assert td.shape == [2, 3]
+        assert td.shape == [2, 5]
+        assert td.block_shape == [2, 3]
         assert td.blocks_per_axis == 3
         assert td.block_size == 2
         assert td.block_axis == 1
@@ -131,7 +134,8 @@ class TestConfigKnobs:
         self, kernel, dtype, config, expected_shape, expected_count, expected_size
     ):
         td = TensorDigest([2, 5], kernel=kernel, dtype=dtype, blocks=config)
-        assert td.shape == expected_shape
+        assert td.shape == [2, 5]
+        assert td.block_shape == expected_shape
         row = np.arange(10, dtype=dtype).reshape(2, 5)
         td.update(row)
         restored = TensorDigest.from_bytes(td.to_bytes())
@@ -147,14 +151,14 @@ class TestConfigKnobs:
         assert default.blocks_per_axis == 0
         assert default.block_size is None
         assert default.block_axis == 1
-        assert TensorDigest([2, 5], blocks_per_axis=0).shape == [2, 5]
+        assert TensorDigest([2, 5], blocks_per_axis=0).block_shape == [2, 5]
         whole = TensorDigest([2, 5], blocks_per_axis=1)
         clamped = TensorDigest([2, 5], blocks_per_axis=99)
         sized = TensorDigest([2, 5], block_size=2, block_axis=-1)
-        assert whole.shape == [2, 1]
-        assert clamped.shape == [2, 5]
+        assert whole.block_shape == [2, 1]
+        assert clamped.block_shape == [2, 5]
         assert clamped.blocks_per_axis == 99
-        assert sized.shape == [2, 3]
+        assert sized.block_shape == [2, 3]
         assert sized.block_size == 2
 
     @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])

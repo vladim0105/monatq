@@ -14,7 +14,7 @@ fn exercise<K: DigestKernel<f32>>() {
             let mut negative =
                 TensorDigest::<f32, K>::with_blocks(&shape, constructor(2, axis - 3)).unwrap();
             assert_eq!(negative.block_axis(), axis as usize);
-            assert_eq!(negative.shape(), positive.shape());
+            assert_eq!(negative.block_shape(), positive.block_shape());
             positive.update(&values).unwrap();
             negative.update(&values).unwrap();
             assert_eq!(
