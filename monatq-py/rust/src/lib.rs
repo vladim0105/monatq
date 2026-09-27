@@ -186,14 +186,8 @@ impl Inner {
     fn block_count(&self) -> usize {
         dispatch!(self, d => d.block_count())
     }
-    fn block_axis(&self) -> usize {
-        dispatch!(self, d => d.block_axis())
-    }
-    fn blocks_per_axis(&self) -> usize {
-        dispatch!(self, d => d.blocks_per_axis())
-    }
-    fn block_size(&self) -> Option<usize> {
-        dispatch!(self, d => d.block_size())
+    fn block_config(&self) -> monatq::BlockConfig {
+        dispatch!(self, d => d.block_config())
     }
     fn dtype(&self) -> &'static str {
         match self {
@@ -252,15 +246,15 @@ impl Inner {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum PyBlockMode {
     Size(usize),
     Count(usize),
 }
 
 /// Configuration for grouping one tensor axis into independent digest blocks.
-#[pyclass(name = "BlockConfig", frozen)]
-#[derive(Clone, Copy)]
+#[pyclass(name = "BlockConfig", frozen, eq)]
+#[derive(Clone, Copy, PartialEq)]
 struct PyBlockConfig {
     mode: PyBlockMode,
     axis: isize,
@@ -271,6 +265,21 @@ impl PyBlockConfig {
         match self.mode {
             PyBlockMode::Size(size) => monatq::BlockConfig::block_size(size, self.axis),
             PyBlockMode::Count(count) => monatq::BlockConfig::blocks_per_axis(count, self.axis),
+        }
+    }
+
+    /// `None` for elementwise tracking, which Python expresses by passing no block config.
+    fn from_rust(config: monatq::BlockConfig) -> Option<Self> {
+        match config {
+            monatq::BlockConfig::Elementwise => None,
+            monatq::BlockConfig::Size { size, axis } => Some(Self {
+                mode: PyBlockMode::Size(size),
+                axis,
+            }),
+            monatq::BlockConfig::Count { count, axis } => Some(Self {
+                mode: PyBlockMode::Count(count),
+                axis,
+            }),
         }
     }
 }
@@ -288,6 +297,11 @@ impl PyBlockConfig {
             (Some(0), None) => {
                 return Err(PyValueError::new_err(
                     "block_size must be greater than zero",
+                ));
+            }
+            (None, Some(0)) => {
+                return Err(PyValueError::new_err(
+                    "blocks_per_axis must be greater than zero; omit blocks for elementwise tracking",
                 ));
             }
             (Some(size), None) => PyBlockMode::Size(size),
@@ -325,6 +339,17 @@ impl PyBlockConfig {
     #[getter]
     fn axis(&self) -> isize {
         self.axis
+    }
+
+    fn __repr__(&self) -> String {
+        match self.mode {
+            PyBlockMode::Size(size) => {
+                format!("BlockConfig(block_size={size}, axis={})", self.axis)
+            }
+            PyBlockMode::Count(count) => {
+                format!("BlockConfig(blocks_per_axis={count}, axis={})", self.axis)
+            }
+        }
     }
 }
 
@@ -367,13 +392,15 @@ impl PyTensorDigest {
         }
         let block_config = if let Some(config) = blocks {
             Some((*config).into_rust())
-        } else if !shape.is_empty()
-            || block_size.is_some()
-            || blocks_per_axis.is_some()
-            || block_axis.is_some()
-        {
-            let count = blocks_per_axis.or_else(|| block_size.is_none().then_some(0));
-            Some(PyBlockConfig::new(block_size, count, block_axis.unwrap_or(-1))?.into_rust())
+        } else if block_size.is_some() || blocks_per_axis.is_some() {
+            Some(
+                PyBlockConfig::new(block_size, blocks_per_axis, block_axis.unwrap_or(-1))?
+                    .into_rust(),
+            )
+        } else if block_axis.is_some() {
+            return Err(PyValueError::new_err(
+                "block_axis requires block_size or blocks_per_axis",
+            ));
         } else {
             None
         };
@@ -464,17 +491,10 @@ impl PyTensorDigest {
     fn block_count(&self) -> usize {
         self.inner.block_count()
     }
+    /// Resolved grouping (nonnegative axis, effective count), or `None` when elementwise.
     #[getter]
-    fn block_axis(&self) -> usize {
-        self.inner.block_axis()
-    }
-    #[getter]
-    fn blocks_per_axis(&self) -> usize {
-        self.inner.blocks_per_axis()
-    }
-    #[getter]
-    fn block_size(&self) -> Option<usize> {
-        self.inner.block_size()
+    fn block_config(&self) -> Option<PyBlockConfig> {
+        PyBlockConfig::from_rust(self.inner.block_config())
     }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {

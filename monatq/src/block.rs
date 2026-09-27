@@ -1,47 +1,46 @@
 use crate::{Error, Result};
 
-/// One-dimensional statistical groups along a tensor axis, never 2D tiles.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BlockConfig {
-    grouping: Grouping,
-    /// Axis to partition. Negative indices count from the end (`-1` is the last axis).
-    /// Resolved and validated against the shape when constructing a digest.
-    pub axis: isize,
+/// How a digest groups tensor elements into statistical blocks.
+///
+/// Blocks are one-dimensional groups along a single axis, never 2D tiles. Negative axes
+/// count from the end (`-1` is the last axis) and are resolved against the shape when a
+/// digest is constructed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum BlockConfig {
+    /// Track every element independently.
+    #[default]
+    Elementwise,
+    /// Fixed-width groups of `size` values along `axis`, with a short final group when the
+    /// axis length is not a multiple of `size`. `size` must be positive.
+    Size { size: usize, axis: isize },
+    /// `count` balanced groups along `axis`, larger groups first. `count` must be positive
+    /// and is clamped to the axis length.
+    Count { count: usize, axis: isize },
+}
+
+impl BlockConfig {
+    /// Track every element independently. This is the default.
+    pub const fn elementwise() -> Self {
+        Self::Elementwise
+    }
+
+    /// Fixed-width groups with a short final group. Size must be positive.
+    pub const fn block_size(size: usize, axis: isize) -> Self {
+        Self::Size { size, axis }
+    }
+
+    /// Balanced groups. Count must be positive and is clamped to the axis length.
+    pub const fn blocks_per_axis(count: usize, axis: isize) -> Self {
+        Self::Count { count, axis }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Grouping {
     Size(usize),
+    /// Stores the effective count, already clamped to the axis length.
     Count(usize),
-}
-
-impl Default for BlockConfig {
-    fn default() -> Self {
-        Self::blocks_per_axis(0, 0)
-    }
-}
-
-impl BlockConfig {
-    /// Fixed-width groups with a short final group. Size must be positive.
-    pub const fn block_size(size: usize, axis: isize) -> Self {
-        Self {
-            grouping: Grouping::Size(size),
-            axis,
-        }
-    }
-
-    /// Balanced groups. Zero means elementwise; counts are clamped to the axis length.
-    pub const fn blocks_per_axis(count: usize, axis: isize) -> Self {
-        Self {
-            grouping: Grouping::Count(count),
-            axis,
-        }
-    }
-
-    /// Compatibility alias for [`Self::blocks_per_axis`].
-    pub const fn new(blocks_per_axis: usize, axis: isize) -> Self {
-        Self::blocks_per_axis(blocks_per_axis, axis)
-    }
+    Elementwise,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -61,10 +60,28 @@ pub(crate) struct BlockLayout {
 
 impl BlockLayout {
     pub(crate) fn new(shape: &[usize], config: BlockConfig) -> Result<Self> {
-        let axis = if config.axis < 0 {
-            shape.len().checked_sub(config.axis.unsigned_abs())
+        let (grouping, requested_axis) = match config {
+            BlockConfig::Elementwise if shape.is_empty() => return Ok(Self::scalar()),
+            BlockConfig::Elementwise => (Grouping::Elementwise, -1),
+            BlockConfig::Size { size: 0, .. } => {
+                return Err(Error::InvalidConfig {
+                    parameter: "block size",
+                    message: "must be positive",
+                });
+            }
+            BlockConfig::Size { size, axis } => (Grouping::Size(size), axis),
+            BlockConfig::Count { count: 0, .. } => {
+                return Err(Error::InvalidConfig {
+                    parameter: "blocks per axis",
+                    message: "must be positive; use BlockConfig::Elementwise for elementwise tracking",
+                });
+            }
+            BlockConfig::Count { count, axis } => (Grouping::Count(count), axis),
+        };
+        let axis = if requested_axis < 0 {
+            shape.len().checked_sub(requested_axis.unsigned_abs())
         } else {
-            Some(config.axis as usize)
+            Some(requested_axis as usize)
         }
         .filter(|&axis| axis < shape.len())
         .ok_or(Error::InvalidConfig {
@@ -79,15 +96,13 @@ impl BlockLayout {
                 message: "element count overflows usize",
             })?;
         let axis_len = shape[axis];
-        let blocks_axis = match config.grouping {
-            Grouping::Size(0) => {
-                return Err(Error::InvalidConfig {
-                    parameter: "block size",
-                    message: "must be positive",
-                });
-            }
+        let grouping = match grouping {
+            Grouping::Count(count) => Grouping::Count(count.min(axis_len).max(1)),
+            other => other,
+        };
+        let blocks_axis = match grouping {
+            Grouping::Elementwise => axis_len,
             Grouping::Size(size) => axis_len.div_ceil(size),
-            Grouping::Count(0) => axis_len,
             Grouping::Count(count) => count.min(axis_len),
         };
         let (base_block_len, larger_blocks) = if blocks_axis == 0 {
@@ -119,7 +134,7 @@ impl BlockLayout {
             shape: compact_shape,
             input_numel: numel,
             block_count,
-            grouping: config.grouping,
+            grouping,
             axis,
             inner,
             axis_len,
@@ -129,52 +144,47 @@ impl BlockLayout {
         })
     }
 
-    pub(crate) fn default_for(shape: &[usize]) -> Self {
-        Self::try_default_for(shape).expect("default block layout")
+    /// A scalar (empty-shape) digest has no axis to index, so it gets fixed single-block
+    /// metadata that the span arithmetic can use safely.
+    fn scalar() -> Self {
+        Self {
+            input_shape: vec![],
+            shape: vec![],
+            input_numel: 1,
+            block_count: 1,
+            grouping: Grouping::Elementwise,
+            axis: 0,
+            inner: 1,
+            axis_len: 1,
+            blocks_axis: 1,
+            base_block_len: 1,
+            larger_blocks: 0,
+        }
     }
 
-    pub(crate) fn try_default_for(shape: &[usize]) -> Result<Self> {
-        // Existing constructors accept scalar/empty shapes. Preserve that public geometry while
-        // using safe scalar metadata internally.
-        if shape.is_empty() {
-            Ok(Self {
-                input_shape: vec![],
-                shape: vec![],
-                input_numel: 1,
-                block_count: 1,
-                grouping: Grouping::Count(0),
-                axis: 0,
-                inner: 1,
-                axis_len: 1,
-                blocks_axis: 1,
-                base_block_len: 1,
-                larger_blocks: 0,
-            })
-        } else {
-            Self::new(shape, BlockConfig::default())
-        }
+    pub(crate) fn default_for(shape: &[usize]) -> Self {
+        Self::new(shape, BlockConfig::Elementwise).expect("elementwise block layout")
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        let rebuilt = if self.input_shape.is_empty() {
-            Self::try_default_for(&self.input_shape)
-        } else {
-            Self::new(
-                &self.input_shape,
-                BlockConfig {
-                    grouping: self.grouping,
-                    axis: isize::try_from(self.axis)
-                        .map_err(|_| Error::InvalidSnapshot("block axis overflows isize".into()))?,
-                },
-            )
-        }
-        .map_err(|error| Error::InvalidSnapshot(error.to_string()))?;
+        let rebuilt = Self::new(&self.input_shape, self.config())
+            .map_err(|error| Error::InvalidSnapshot(error.to_string()))?;
         if &rebuilt != self {
             return Err(Error::InvalidSnapshot(
                 "inconsistent block layout metadata".into(),
             ));
         }
         Ok(())
+    }
+
+    /// The resolved configuration: a nonnegative axis and, in count mode, the effective count.
+    pub(crate) fn config(&self) -> BlockConfig {
+        let axis = self.axis as isize;
+        match self.grouping {
+            Grouping::Elementwise => BlockConfig::Elementwise,
+            Grouping::Size(size) => BlockConfig::Size { size, axis },
+            Grouping::Count(count) => BlockConfig::Count { count, axis },
+        }
     }
 
     /// Flat input positions of `block` as `(first, stride, len)`.
@@ -204,7 +214,9 @@ impl BlockLayout {
     pub(crate) fn max_block_len(&self) -> usize {
         let len = match self.grouping {
             Grouping::Size(size) => size.min(self.axis_len),
-            Grouping::Count(_) => self.base_block_len + usize::from(self.larger_blocks > 0),
+            Grouping::Count(_) | Grouping::Elementwise => {
+                self.base_block_len + usize::from(self.larger_blocks > 0)
+            }
         };
         len.max(1)
     }
@@ -225,17 +237,10 @@ impl BlockLayout {
                 let start = block_axis * size;
                 (start, size.min(self.axis_len - start))
             }
-            Grouping::Count(_) => (
+            Grouping::Count(_) | Grouping::Elementwise => (
                 block_axis * self.base_block_len + block_axis.min(self.larger_blocks),
                 self.base_block_len + usize::from(block_axis < self.larger_blocks),
             ),
-        }
-    }
-
-    pub(crate) fn block_size(&self) -> Option<usize> {
-        match self.grouping {
-            Grouping::Size(size) => Some(size),
-            Grouping::Count(_) => None,
         }
     }
 
@@ -250,15 +255,6 @@ impl BlockLayout {
     }
     pub(crate) fn shape(&self) -> &[usize] {
         &self.shape
-    }
-    pub(crate) fn axis(&self) -> usize {
-        self.axis
-    }
-    pub(crate) fn blocks_per_axis(&self) -> usize {
-        match self.grouping {
-            Grouping::Count(count) => count,
-            Grouping::Size(_) => self.blocks_axis,
-        }
     }
 }
 
@@ -287,7 +283,7 @@ mod tests {
 
     #[test]
     fn largest_axis_can_map_to_one_block_without_overflow() {
-        let layout = BlockLayout::new(&[usize::MAX], BlockConfig::new(1, 0)).unwrap();
+        let layout = BlockLayout::new(&[usize::MAX], BlockConfig::blocks_per_axis(1, 0)).unwrap();
         assert_eq!(layout.span(0), (0, 1, usize::MAX));
     }
 
@@ -325,12 +321,61 @@ mod tests {
 
     #[test]
     fn balanced_mapping_covers_every_position_once() {
-        for length in 1..40 {
-            for requested in 0..45 {
+        for length in 0..40 {
+            for requested in 1..45 {
                 assert_partition(
-                    &BlockLayout::new(&[2, length, 3], BlockConfig::new(requested, 1)).unwrap(),
+                    &BlockLayout::new(&[2, length, 3], BlockConfig::blocks_per_axis(requested, 1))
+                        .unwrap(),
                 );
             }
+            assert_partition(&BlockLayout::new(&[2, length, 3], BlockConfig::Elementwise).unwrap());
+        }
+    }
+
+    #[test]
+    fn zero_is_rejected_in_both_modes() {
+        for config in [
+            BlockConfig::block_size(0, 1),
+            BlockConfig::blocks_per_axis(0, 1),
+        ] {
+            assert!(matches!(
+                BlockLayout::new(&[2, 5], config),
+                Err(Error::InvalidConfig { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn config_reports_resolved_axis_and_effective_count() {
+        let config = |shape: &[usize], config| BlockLayout::new(shape, config).unwrap().config();
+        assert_eq!(
+            config(&[2, 5], BlockConfig::blocks_per_axis(99, -1)),
+            BlockConfig::Count { count: 5, axis: 1 }
+        );
+        assert_eq!(
+            config(&[2, 5], BlockConfig::block_size(99, -2)),
+            BlockConfig::Size { size: 99, axis: 0 }
+        );
+        assert_eq!(
+            config(&[2, 0], BlockConfig::blocks_per_axis(4, 1)),
+            BlockConfig::Count { count: 1, axis: 1 }
+        );
+        assert_eq!(
+            config(&[2, 5], BlockConfig::Elementwise),
+            BlockConfig::Elementwise
+        );
+        assert_eq!(
+            config(&[], BlockConfig::Elementwise),
+            BlockConfig::Elementwise
+        );
+    }
+
+    #[test]
+    fn elementwise_blocks_are_the_input_positions() {
+        let layout = BlockLayout::new(&[2, 3, 4], BlockConfig::Elementwise).unwrap();
+        assert_eq!(layout.shape(), &[2, 3, 4]);
+        for block in 0..layout.block_count() {
+            assert_eq!(layout.span(block), (block, 1, 1));
         }
     }
 }

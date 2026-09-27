@@ -549,14 +549,8 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     fn block_count(&self) -> usize {
         self.layout.block_count()
     }
-    fn block_axis(&self) -> usize {
-        self.layout.axis()
-    }
-    fn blocks_per_axis(&self) -> usize {
-        self.layout.blocks_per_axis()
-    }
-    fn block_size(&self) -> Option<usize> {
-        self.layout.block_size()
+    fn block_config(&self) -> crate::BlockConfig {
+        self.layout.config()
     }
     fn total_weight(&self, idx: usize) -> crate::Result<u32> {
         crate::error::check_index(idx, self.layout.block_count())?;
@@ -1025,7 +1019,8 @@ mod tests {
 
     #[test]
     fn blocked_mode_never_allocates_or_uses_tensor_row_buffer() {
-        let layout = BlockLayout::new(&[4, 1024], crate::BlockConfig::new(4, 1)).unwrap();
+        let layout =
+            BlockLayout::new(&[4, 1024], crate::BlockConfig::blocks_per_axis(4, 1)).unwrap();
         let mut td = TDigestStorage::<f32>::with_layout(layout, 100, 200);
         assert!(td.row_buffer.is_empty());
         td.update(&vec![1.0; 4096]);
@@ -1157,7 +1152,7 @@ mod tests {
 
     #[test]
     fn blocked_snapshot_load_rebuilds_row_workspace_from_block_length() {
-        let layout = BlockLayout::new(&[4], crate::BlockConfig::new(2, 0)).unwrap();
+        let layout = BlockLayout::new(&[4], crate::BlockConfig::blocks_per_axis(2, 0)).unwrap();
         let mut storage = TDigestStorage::<f32>::with_layout(layout, 10, 20);
         storage.update(&[1.0, 2.0, 3.0, 4.0]);
         let bytes = storage.to_bytes().unwrap();

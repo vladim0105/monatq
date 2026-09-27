@@ -1,19 +1,23 @@
 use monatq::{BlockConfig, DigestKernel, RankKnot, TDigest, TensorDigest};
 
+fn resolved_axis<K: DigestKernel<f32>>(digest: &TensorDigest<f32, K>) -> isize {
+    match digest.block_config() {
+        BlockConfig::Size { axis, .. } | BlockConfig::Count { axis, .. } => axis,
+        BlockConfig::Elementwise => panic!("expected a blocked digest"),
+    }
+}
+
 fn exercise<K: DigestKernel<f32>>() {
     let shape = [2, 5, 3];
     let values: Vec<f32> = (0..30).map(|n| n as f32).collect();
     for axis in 0..3isize {
-        for constructor in [
-            BlockConfig::block_size,
-            BlockConfig::blocks_per_axis,
-            BlockConfig::new,
-        ] {
+        for constructor in [BlockConfig::block_size, BlockConfig::blocks_per_axis] {
             let mut positive =
                 TensorDigest::<f32, K>::with_blocks(&shape, constructor(2, axis)).unwrap();
             let mut negative =
                 TensorDigest::<f32, K>::with_blocks(&shape, constructor(2, axis - 3)).unwrap();
-            assert_eq!(negative.block_axis(), axis as usize);
+            assert_eq!(negative.block_config(), constructor(2, axis));
+            assert_eq!(resolved_axis(&negative), axis);
             assert_eq!(negative.block_shape(), positive.block_shape());
             positive.update(&values).unwrap();
             negative.update(&values).unwrap();
@@ -25,7 +29,7 @@ fn exercise<K: DigestKernel<f32>>() {
             let bytes = negative.to_bytes().unwrap();
             assert_eq!(bytes, positive.to_bytes().unwrap());
             let mut restored = TensorDigest::<f32, K>::from_bytes(&bytes).unwrap();
-            assert_eq!(restored.block_axis(), axis as usize);
+            assert_eq!(resolved_axis(&restored), axis);
             restored.update(&values).unwrap();
             negative.update(&values).unwrap();
             assert_eq!(restored.quantile(0.5), negative.quantile(0.5));
@@ -47,7 +51,7 @@ fn exercise<K: DigestKernel<f32>>() {
     assert_eq!(TensorDigest::<f32, K>::new(&[]).block_count(), 1);
     let empty =
         TensorDigest::<f32, K>::with_blocks(&[2, 0], BlockConfig::block_size(2, -1)).unwrap();
-    assert_eq!(empty.block_axis(), 1);
+    assert_eq!(empty.block_config(), BlockConfig::Size { size: 2, axis: 1 });
     assert_eq!(empty.block_count(), 0);
 }
 

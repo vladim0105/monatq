@@ -276,7 +276,10 @@ where
 {
     for (shape, blocks) in [
         (&[5, 2][..], None),
-        (&[5, 2][..], Some(monatq::BlockConfig::new(2, 0))),
+        (
+            &[5, 2][..],
+            Some(monatq::BlockConfig::blocks_per_axis(2, 0)),
+        ),
         (&[][..], None),
         (&[0, 2][..], None),
     ] {
@@ -299,8 +302,7 @@ where
             assert_eq!(restored.block_count(), original.block_count());
             assert_eq!(restored.block_shape(), original.block_shape());
             assert_eq!(restored.numel(), original.numel());
-            assert_eq!(restored.block_axis(), original.block_axis());
-            assert_eq!(restored.blocks_per_axis(), original.blocks_per_axis());
+            assert_eq!(restored.block_config(), original.block_config());
             assert_eq!(restored.to_bytes().unwrap(), bytes);
 
             // Loading must restore query results before any further ingestion.

@@ -5,7 +5,7 @@ fn sample(step: usize) -> Vec<f32> {
 }
 
 #[test]
-fn k_zero_matches_existing_behavior_for_both_kernels() {
+fn explicit_elementwise_matches_default_for_both_kernels() {
     let mut rk_old = TensorDigest::<f32, RankKnot>::with_config(
         &[2, 5, 2],
         RankKnotConfig { buffer_capacity: 3 },
@@ -13,7 +13,7 @@ fn k_zero_matches_existing_behavior_for_both_kernels() {
     let mut rk_new = TensorDigest::<f32, RankKnot>::with_block_config(
         &[2, 5, 2],
         RankKnotConfig { buffer_capacity: 3 },
-        BlockConfig::new(0, 1),
+        BlockConfig::Elementwise,
     )
     .unwrap();
     let mut td_old = TensorDigest::<f32, TDigest>::with_config(
@@ -29,7 +29,7 @@ fn k_zero_matches_existing_behavior_for_both_kernels() {
             compression: 40,
             ..Default::default()
         },
-        BlockConfig::new(0, 1),
+        BlockConfig::Elementwise,
     )
     .unwrap();
     for step in 0..17 {
@@ -43,11 +43,11 @@ fn k_zero_matches_existing_behavior_for_both_kernels() {
         assert_eq!(rk_old.quantile(q), rk_new.quantile(q));
         assert_eq!(td_old.quantile(q), td_new.quantile(q));
     }
-    // Snapshots preserve the selected axis even in element-wise mode.
+    // Snapshots preserve elementwise mode.
     let rk_loaded = TensorDigest::<f32, RankKnot>::from_bytes(&rk_new.to_bytes().unwrap()).unwrap();
     let td_loaded = TensorDigest::<f32, TDigest>::from_bytes(&td_new.to_bytes().unwrap()).unwrap();
-    assert_eq!(rk_loaded.block_axis(), 1);
-    assert_eq!(td_loaded.block_axis(), 1);
+    assert_eq!(rk_loaded.block_config(), BlockConfig::Elementwise);
+    assert_eq!(td_loaded.block_config(), BlockConfig::Elementwise);
 }
 
 fn exercise_blocks<K: monatq::DigestKernel<f32>>(mut d: TensorDigest<f32, K>) {
@@ -55,8 +55,7 @@ fn exercise_blocks<K: monatq::DigestKernel<f32>>(mut d: TensorDigest<f32, K>) {
     assert_eq!(d.block_count(), 8);
     assert_eq!(d.shape(), &[2, 5, 2]);
     assert_eq!(d.numel(), 20);
-    assert_eq!(d.block_axis(), 1);
-    assert_eq!(d.blocks_per_axis(), 2);
+    assert_eq!(d.block_config(), BlockConfig::Count { count: 2, axis: 1 });
     for step in 0..2 {
         d.update(&sample(step)).unwrap();
     }
@@ -89,14 +88,16 @@ fn exercise_blocks<K: monatq::DigestKernel<f32>>(mut d: TensorDigest<f32, K>) {
 #[test]
 fn rankknot_pools_nonlast_axis_and_partial_tail_across_updates() {
     exercise_blocks(
-        TensorDigest::<f32, RankKnot>::with_blocks(&[2, 5, 2], BlockConfig::new(2, 1)).unwrap(),
+        TensorDigest::<f32, RankKnot>::with_blocks(&[2, 5, 2], BlockConfig::blocks_per_axis(2, 1))
+            .unwrap(),
     );
 }
 
 #[test]
 fn tdigest_pools_nonlast_axis_and_partial_tail_across_updates() {
     exercise_blocks(
-        TensorDigest::<f32, TDigest>::with_blocks(&[2, 5, 2], BlockConfig::new(2, 1)).unwrap(),
+        TensorDigest::<f32, TDigest>::with_blocks(&[2, 5, 2], BlockConfig::blocks_per_axis(2, 1))
+            .unwrap(),
     );
 }
 
@@ -116,7 +117,8 @@ fn scalar_snapshots_remain_supported() {
 
 fn zero_axis<K: monatq::DigestKernel<f32>>() {
     let mut digest =
-        TensorDigest::<f32, K>::with_blocks(&[2, 0, 3], BlockConfig::new(16, 1)).unwrap();
+        TensorDigest::<f32, K>::with_blocks(&[2, 0, 3], BlockConfig::blocks_per_axis(16, 1))
+            .unwrap();
     assert_eq!(digest.block_shape(), &[2, 0, 3]);
     assert_eq!(digest.block_count(), 0);
     digest.update(&[]).unwrap();
@@ -132,7 +134,8 @@ fn zero_length_axis_is_safe() {
 }
 
 fn integer_blocks<K: monatq::DigestKernel<i32>>() {
-    let mut d = TensorDigest::<i32, K>::with_blocks(&[2, 5], BlockConfig::new(2, 1)).unwrap();
+    let mut d =
+        TensorDigest::<i32, K>::with_blocks(&[2, 5], BlockConfig::blocks_per_axis(2, 1)).unwrap();
     d.update(&[0, 0, 0, 1000, 5, -10, -10, -10, -10, -5])
         .unwrap();
     assert_eq!(d.quantile(1.0), vec![0.0, 1000.0, -10.0, -5.0]);
@@ -155,20 +158,32 @@ fn integer_blocks_pool_raw_values_and_roundtrip() {
 
 #[test]
 fn block_config_is_validated_without_panics() {
-    let result = TensorDigest::<f32, RankKnot>::with_blocks(&[2, 3], BlockConfig::new(2, 2));
+    let result =
+        TensorDigest::<f32, RankKnot>::with_blocks(&[2, 3], BlockConfig::blocks_per_axis(2, 2));
     assert!(matches!(result, Err(Error::InvalidConfig { .. })));
 
-    let overflow =
-        TensorDigest::<f32, RankKnot>::with_blocks(&[usize::MAX, 2], BlockConfig::new(1, 0));
+    let overflow = TensorDigest::<f32, RankKnot>::with_blocks(
+        &[usize::MAX, 2],
+        BlockConfig::blocks_per_axis(1, 0),
+    );
     assert!(matches!(overflow, Err(Error::InvalidConfig { .. })));
+
+    for zero in [
+        BlockConfig::blocks_per_axis(0, 1),
+        BlockConfig::block_size(0, 1),
+    ] {
+        let result = TensorDigest::<f32, RankKnot>::with_blocks(&[2, 3], zero);
+        assert!(matches!(result, Err(Error::InvalidConfig { .. })));
+    }
 }
 
 fn assert_block_count_modes<K: monatq::DigestKernel<f32>>() {
     let mut identity =
-        TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::new(0, 1)).unwrap();
-    let mut one = TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::new(1, 1)).unwrap();
+        TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::Elementwise).unwrap();
+    let mut one =
+        TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::blocks_per_axis(1, 1)).unwrap();
     let mut clamped =
-        TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::new(99, 1)).unwrap();
+        TensorDigest::<f32, K>::with_blocks(&[2, 5], BlockConfig::blocks_per_axis(99, 1)).unwrap();
     let row: Vec<f32> = (0..10).map(|v| v as f32).collect();
     identity.update(&row).unwrap();
     one.update(&row).unwrap();
@@ -177,13 +192,16 @@ fn assert_block_count_modes<K: monatq::DigestKernel<f32>>() {
     one.flush();
 
     assert_eq!(identity.block_shape(), &[2, 5]);
-    assert_eq!(identity.blocks_per_axis(), 0);
+    assert_eq!(identity.block_config(), BlockConfig::Elementwise);
     assert_eq!(identity.quantile(1.0), row);
     assert_eq!(one.block_shape(), &[2, 1]);
     assert_eq!(one.total_weight(0).unwrap(), 5);
     assert_eq!(one.total_weight(1).unwrap(), 5);
     assert_eq!(clamped.block_shape(), &[2, 5]);
-    assert_eq!(clamped.blocks_per_axis(), 99);
+    assert_eq!(
+        clamped.block_config(),
+        BlockConfig::Count { count: 5, axis: 1 }
+    );
     assert_eq!(clamped.quantile(1.0), row);
 }
 
@@ -195,7 +213,8 @@ fn zero_one_and_overlong_requested_counts_have_defined_semantics() {
 
 fn assert_large_balanced_layout<K: monatq::DigestKernel<f32>>() {
     let shape = [256, 129, 2];
-    let mut digest = TensorDigest::<f32, K>::with_blocks(&shape, BlockConfig::new(16, 1)).unwrap();
+    let mut digest =
+        TensorDigest::<f32, K>::with_blocks(&shape, BlockConfig::blocks_per_axis(16, 1)).unwrap();
     assert_eq!(digest.block_shape(), &[256, 16, 2]);
     assert_eq!(digest.block_count(), 256 * 16 * 2);
     assert_eq!(digest.shape(), &shape);
@@ -236,7 +255,8 @@ fn axis_129_is_partitioned_into_sixteen_balanced_blocks() {
 }
 
 fn assert_uneven_block_merges_and_continuation<K: monatq::DigestKernel<f32>>() {
-    let mut blocked = TensorDigest::<f32, K>::with_blocks(&[5], BlockConfig::new(2, 0)).unwrap();
+    let mut blocked =
+        TensorDigest::<f32, K>::with_blocks(&[5], BlockConfig::blocks_per_axis(2, 0)).unwrap();
     let mut reference = TensorDigest::<f32, K>::new(&[1]);
     for _ in 0..20 {
         blocked.update(&[0.0, 0.0, 0.0, 10.0, 10.0]).unwrap();
@@ -280,7 +300,8 @@ fn uneven_block_merges_preserve_weights_and_continue_for_both_kernels() {
 
 fn assert_compact_channel_and_all_merges<K: monatq::DigestKernel<f32>>() {
     let mut digest =
-        TensorDigest::<f32, K>::with_blocks(&[2, 5, 2], BlockConfig::new(2, 1)).unwrap();
+        TensorDigest::<f32, K>::with_blocks(&[2, 5, 2], BlockConfig::blocks_per_axis(2, 1))
+            .unwrap();
     digest.update(&sample(0)).unwrap();
     let channel = digest.merge_channels(&[1]).unwrap();
     assert_eq!(channel.total_weight(0).unwrap(), 10);
@@ -297,9 +318,11 @@ fn channel_and_all_merges_visit_compact_blocks_once() {
 #[test]
 fn blocked_snapshot_roundtrip_preserves_layout_weights_and_queries() {
     let mut rk =
-        TensorDigest::<f32, RankKnot>::with_blocks(&[2, 5, 2], BlockConfig::new(2, 1)).unwrap();
+        TensorDigest::<f32, RankKnot>::with_blocks(&[2, 5, 2], BlockConfig::blocks_per_axis(2, 1))
+            .unwrap();
     let mut td =
-        TensorDigest::<f32, TDigest>::with_blocks(&[2, 5, 2], BlockConfig::new(2, 1)).unwrap();
+        TensorDigest::<f32, TDigest>::with_blocks(&[2, 5, 2], BlockConfig::blocks_per_axis(2, 1))
+            .unwrap();
     for step in 0..13 {
         let row = sample(step);
         rk.update(&row).unwrap();
@@ -313,10 +336,9 @@ fn blocked_snapshot_roundtrip_preserves_layout_weights_and_queries() {
     for dshape in [rk2.block_shape(), td2.block_shape()] {
         assert_eq!(dshape, &[2, 2, 2]);
     }
-    assert_eq!(rk2.block_axis(), 1);
-    assert_eq!(td2.block_axis(), 1);
-    assert_eq!(rk2.blocks_per_axis(), 2);
-    assert_eq!(td2.blocks_per_axis(), 2);
+    for config in [rk2.block_config(), td2.block_config()] {
+        assert_eq!(config, BlockConfig::Count { count: 2, axis: 1 });
+    }
     assert_eq!(rk2.shape(), &[2, 5, 2]);
     assert_eq!(td2.shape(), &[2, 5, 2]);
     assert_eq!(rk2.total_weight(6).unwrap(), 26);

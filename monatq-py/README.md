@@ -72,8 +72,7 @@ digest = TensorDigest(
 )
 assert digest.shape == [256, 129, 2]        # original input shape
 assert digest.block_shape == [256, 3, 2]    # atomic block grid
-assert digest.block_size == 64
-assert digest.blocks_per_axis == 3          # effective group count
+assert digest.block_config == BlockConfig(block_size=64, axis=1)
 
 # A requested count instead makes balanced groups (9 values, then groups of 8).
 balanced = TensorDigest(
@@ -81,29 +80,34 @@ balanced = TensorDigest(
     blocks=BlockConfig(blocks_per_axis=16, axis=1),
 )
 assert balanced.block_shape == [256, 16, 2]
-assert balanced.block_size is None
-assert balanced.blocks_per_axis == 16       # requested count
+
+assert TensorDigest(shape=[256, 129, 2]).block_config is None  # elementwise
 ```
 
 Both kernels support both modes. `axis` defaults to `-1` and accepts negative indices,
-just like Rust's `BlockConfig`. The shared Rust layout resolves and validates the axis;
-`digest.block_axis` reports the resolved nonnegative index, including after snapshot loading.
+just like Rust's `BlockConfig`. Both `block_size` and `blocks_per_axis` must be positive;
+omit block arguments entirely for elementwise tracking, the default.
+
+`digest.block_config` returns the grouping in resolved form, including after snapshot
+loading: `axis` is the nonnegative index, and `blocks_per_axis` is the effective count after
+clamping to the axis length. It is `None` for elementwise digests. The effective number of
+groups along the axis is always `block_shape[axis]`.
+
 Blocks are one-dimensional and local to each axis-line: they never cross another axis.
 Every raw value contributes directly to its block digest; values are not averaged first.
 For fixed-size mode, the last group is shorter when the axis length has a remainder. For
-count mode, group lengths differ by at most one. Requested counts above the axis length
-produce elementwise groups, while `blocks_per_axis=0` explicitly selects elementwise
-tracking.
+count mode, group lengths differ by at most one, and requested counts above the axis
+length produce one-element groups.
 
-The legacy `blocks_per_axis=` and `block_axis=` arguments remain supported. A convenience
-`block_size=` argument can likewise be paired with `block_axis=`:
+As a shorthand for `blocks=`, pass `block_size=` or `blocks_per_axis=` directly, optionally
+with `block_axis=`:
 
 ```python
 TensorDigest([256, 129, 2], block_size=64, block_axis=1)
 ```
 
-Do not combine `blocks=...` with any legacy/convenience block arguments, or specify both
-size and count modes; conflicting inputs raise `ValueError`.
+Do not combine `blocks=...` with the shorthand arguments, specify both size and count
+modes, or pass `block_axis=` alone; these raise `ValueError`.
 
 `update` accepts the complete original tensor described by `shape` and `numel`, which
 always report the shape passed at construction. Every downstream operation uses blocks:

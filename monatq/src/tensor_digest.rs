@@ -14,9 +14,7 @@ pub(crate) trait StorageOperations<T: TensorValue>: Sized {
     fn numel(&self) -> usize;
     fn block_shape(&self) -> &[usize];
     fn block_count(&self) -> usize;
-    fn block_axis(&self) -> usize;
-    fn blocks_per_axis(&self) -> usize;
-    fn block_size(&self) -> Option<usize>;
+    fn block_config(&self) -> BlockConfig;
     fn total_weight(&self, idx: usize) -> Result<u32>;
     fn update(&mut self, data: &[T]) -> Result<()>;
     fn flush(&mut self);
@@ -90,7 +88,7 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     }
 
     /// Construct a digest with one-dimensional axis-local groups, selected by size or count.
-    /// The axis, block size, and resulting layout are validated.
+    /// The axis, the positive size or count, and the resulting layout are validated.
     pub fn with_block_config(
         shape: &[usize],
         config: K::Config,
@@ -136,18 +134,11 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
         self.storage.block_count()
     }
 
-    /// Resolved nonnegative input axis, even when configured with a negative index.
-    pub fn block_axis(&self) -> usize {
-        self.storage.block_axis()
-    }
-    /// Requested count in balanced mode (zero means elementwise), or effective count in size mode.
-    pub fn blocks_per_axis(&self) -> usize {
-        self.storage.blocks_per_axis()
-    }
-
-    /// Requested fixed block size, or `None` for balanced count-based grouping.
-    pub fn block_size(&self) -> Option<usize> {
-        self.storage.block_size()
+    /// The block grouping in resolved form: the axis is a nonnegative index, and a count is
+    /// the effective count after clamping to the axis length. A size is reported as
+    /// requested; the effective number of groups along the axis is `block_shape()[axis]`.
+    pub fn block_config(&self) -> BlockConfig {
+        self.storage.block_config()
     }
 
     /// Total flushed observation weight for an atomic block.

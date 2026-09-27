@@ -17,10 +17,10 @@ Notable changes to `monatq` are documented in this file.
   assert_eq!(digest.block_shape(), &[4096, 16]); // what queries return
   ```
 
-  - `BlockConfig::block_size(size, axis)` makes fixed-width groups with a short final group; `BlockConfig::blocks_per_axis(count, axis)` makes balanced groups. Axes may be negative (`-1` is the last axis).
+  - `BlockConfig` is an enum: `Elementwise` (the default), `Size { size, axis }` for fixed-width groups with a short final group, and `Count { count, axis }` for balanced groups clamped to the axis length. The `BlockConfig::elementwise()`, `BlockConfig::block_size(size, axis)` and `BlockConfig::blocks_per_axis(count, axis)` constructors build them. Size and count must be positive. Axes may be negative (`-1` is the last axis).
   - `TensorDigest::with_blocks` and `TensorDigest::with_block_config` construct blocked digests.
-  - New accessors: `block_shape`, `block_count`, `block_axis`, `blocks_per_axis`, `block_size`. `AnyTensorDigest` gains `block_shape`.
-  - Python: `TensorDigest(..., blocks=BlockConfig(block_size=... | blocks_per_axis=..., axis=...))`, the `block_size=` / `blocks_per_axis=` / `block_axis=` shorthands, and matching read-only properties including `block_shape`.
+  - New accessors: `block_shape`, `block_count`, and `block_config`. `block_config` returns the resolved grouping, with a nonnegative axis and, in count mode, the effective count. `AnyTensorDigest` gains `block_shape`.
+  - Python: `TensorDigest(..., blocks=BlockConfig(block_size=... | blocks_per_axis=..., axis=...))`, the `block_size=` / `blocks_per_axis=` shorthands with optional `block_axis=`, and the read-only `block_shape`, `block_count` and `block_config` properties. `block_config` is `None` for elementwise digests. `BlockConfig` supports `==` and has a readable `repr`.
 - `buffer_capacity = 0` is accepted by both kernels and compresses every sample immediately without a buffer. In 0.3.0, Rust panicked and Python raised `ValueError`.
 - `TDigestConfig` gains `buffer_capacity: Option<usize>`; `None` keeps the previous `2 × compression`. Python accepts `buffer_capacity` for `kernel="tdigest"`.
 

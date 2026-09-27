@@ -587,14 +587,8 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     fn block_count(&self) -> usize {
         self.layout.block_count()
     }
-    fn block_axis(&self) -> usize {
-        self.layout.axis()
-    }
-    fn blocks_per_axis(&self) -> usize {
-        self.layout.blocks_per_axis()
-    }
-    fn block_size(&self) -> Option<usize> {
-        self.layout.block_size()
+    fn block_config(&self) -> crate::BlockConfig {
+        self.layout.config()
     }
 
     fn total_weight(&self, idx: usize) -> Result<u32> {
@@ -1084,7 +1078,8 @@ mod tests {
 
     #[test]
     fn blocked_mode_never_allocates_or_uses_tensor_row_buffer() {
-        let layout = BlockLayout::new(&[4, 1024], crate::BlockConfig::new(4, 1)).unwrap();
+        let layout =
+            BlockLayout::new(&[4, 1024], crate::BlockConfig::blocks_per_axis(4, 1)).unwrap();
         let mut storage = RankKnotStorage::<f32>::with_layout(
             layout,
             RankKnotConfig {

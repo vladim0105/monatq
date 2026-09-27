@@ -58,13 +58,15 @@ Choose the grouping explicitly with `BlockConfig`:
   quantization geometry. Size must be positive. A short final group holds the remainder:
   129 values with size 8 gives 16 groups of 8 and one of 1. No padding enters statistics.
 - `BlockConfig::blocks_per_axis(count, axis)`: balanced groups. Splitting 129 values into
-  16 blocks gives one of 9 and 15 of 8. **0 means elementwise**, **1 pools the entire axis**,
+  16 blocks gives one of 9 and 15 of 8. Count must be positive; **1 pools the entire axis**,
   and counts are clamped to the axis length. Larger groups come first.
+- `BlockConfig::Elementwise` (the default, also `BlockConfig::elementwise()`): every element
+  is its own block. This is what `new` and `with_config` use.
 
-`BlockConfig::new(count, axis)` remains an alias for balanced count-based grouping.
+`BlockConfig` is an enum, so these are also written `BlockConfig::Size { size, axis }` and
+`BlockConfig::Count { count, axis }`. Zero is rejected in both modes.
 Both Rust and Python accept signed axes: `-1` is the last axis, `-2` the penultimate.
 Axes are resolved against the input shape; out-of-range axes are rejected.
-`block_axis()` (Python: `block_axis`) reports the resolved nonnegative index.
 
 For weights shaped `[out_features, in_features]`, grouping along the last axis keeps each
 output channel independent. Values are **not averaged** before ingestion: outliers and
@@ -96,8 +98,17 @@ observations.
 Block settings survive snapshot round-trips. Merging combines whole blocks using
 their observation counts, including unequal-sized blocks. The visualizer displays the block
 grid directly. Elementwise tracking is simply the special case of one-element blocks.
-`block_size()` reports the requested size (`None` in balanced mode); `blocks_per_axis()`
-reports the requested count in balanced mode and the effective count in size mode.
+
+`block_config()` returns the grouping in resolved form: the axis as a nonnegative index,
+and in count mode the effective count after clamping. A size is reported as requested. In
+either mode the effective number of groups along the axis is `block_shape()[axis]`:
+
+```rust
+use monatq::{BlockConfig, TensorDigest};
+
+let digest = TensorDigest::<f32>::with_blocks(&[2, 5], BlockConfig::blocks_per_axis(99, -1))?;
+assert_eq!(digest.block_config(), BlockConfig::Count { count: 5, axis: 1 });
+```
 
 The snapshot format now records the grouping mode. Snapshots written by monatq 0.3.0 or
 earlier must be regenerated; incompatible versions are rejected explicitly.

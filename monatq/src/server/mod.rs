@@ -446,7 +446,8 @@ mod tests {
         client.shutdown(Shutdown::Write).unwrap();
 
         let layout =
-            crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::new(2, 1)).unwrap();
+            crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::blocks_per_axis(2, 1))
+                .unwrap();
         let mut digest = TDigestStorage::<f32>::with_layout(layout, 100, 200);
         digest.update(&(0..20).map(|value| value as f32).collect::<Vec<_>>());
         let shape = <TDigestStorage<f32> as StorageOperations<f32>>::block_shape(&digest).to_vec();

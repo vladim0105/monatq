@@ -5,8 +5,7 @@ fn exercise<K: DigestKernel<f32>>() {
     let mut d =
         TensorDigest::<f32, K>::with_blocks(&[2, 5, 2], BlockConfig::block_size(2, 1)).unwrap();
     assert_eq!(d.block_shape(), &[2, 3, 2]);
-    assert_eq!(d.block_size(), Some(2));
-    assert_eq!(d.blocks_per_axis(), 3);
+    assert_eq!(d.block_config(), BlockConfig::Size { size: 2, axis: 1 });
     let values: Vec<f32> = (0..20).map(|x| x as f32).collect();
     d.update(&values).unwrap();
     d.update(&values).unwrap();
@@ -22,7 +21,7 @@ fn exercise<K: DigestKernel<f32>>() {
         assert_eq!(d.total_weight(i).unwrap(), if i % 6 >= 4 { 2 } else { 4 });
     }
     let mut restored = TensorDigest::<f32, K>::from_bytes(&d.to_bytes().unwrap()).unwrap();
-    assert_eq!(restored.block_size(), Some(2));
+    assert_eq!(restored.block_config(), d.block_config());
     assert_eq!(restored.shape(), d.shape());
     assert_eq!(restored.block_shape(), d.block_shape());
     assert_eq!(restored.block_shape(), d.block_shape());
