@@ -25,6 +25,7 @@ fn exercise<K: DigestKernel<f32>>() {
     assert_eq!(restored.block_size(), Some(2));
     assert_eq!(restored.shape(), d.shape());
     restored.update(&values).unwrap();
+    restored.flush();
     assert_eq!(restored.total_weight(4).unwrap(), 3);
     let mut merged = restored.merge_cells(&[0, 2, 4]).unwrap();
     assert_eq!(merged.total_weight(0).unwrap(), 15);

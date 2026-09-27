@@ -340,11 +340,11 @@ struct PyTensorDigest {
 impl PyTensorDigest {
     /// Build a digest over `shape`.
     ///
-    /// `kernel` defaults to `"rankknot"`. The tuning knobs are kernel-specific:
-    /// `compression` belongs to `"tdigest"` and `buffer_capacity` to `"rankknot"`. Passing
-    /// one that does not belong to the selected kernel is an error rather than a silent
-    /// no-op, because silently ignoring an accuracy knob is the kind of thing a caller only
-    /// discovers from a bad result much later.
+    /// `kernel` defaults to `"rankknot"`. `buffer_capacity` is the number of new values each
+    /// block collects before compression, for either kernel; zero disables buffering.
+    /// `compression` belongs to `"tdigest"`. Passing it to another kernel is an error rather
+    /// than a silent no-op, because silently ignoring an accuracy knob is the kind of thing a
+    /// caller only discovers from a bad result much later.
     #[new]
     #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None, blocks = None, block_size = None, blocks_per_axis = None, block_axis = None))]
     fn new(
@@ -412,11 +412,9 @@ impl PyTensorDigest {
                 }
             }
             "tdigest" => {
-                if buffer_capacity.is_some() {
-                    return reject("buffer_capacity", "rankknot");
-                }
                 let config = monatq::TDigestConfig {
                     compression: compression.unwrap_or(100),
+                    buffer_capacity,
                 };
                 match dtype {
                     "float32" => Inner::TDigestF32(match block_config {

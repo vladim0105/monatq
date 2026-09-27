@@ -41,23 +41,21 @@ class TestConfigKnobs:
         with pytest.raises(ValueError, match="compression is a tdigest setting"):
             TensorDigest([4], kernel="rankknot", compression=100)
 
-    def test_buffer_capacity_is_rejected_for_tdigest(self):
-        with pytest.raises(ValueError, match="buffer_capacity is a rankknot setting"):
-            TensorDigest([4], kernel="tdigest", buffer_capacity=64)
-
-    def test_buffer_capacity_is_accepted_for_rankknot(self):
-        td = TensorDigest([1], kernel="rankknot", buffer_capacity=8)
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    @pytest.mark.parametrize("capacity", [0, 8])
+    def test_buffer_capacity_is_accepted_for_both_kernels(self, kernel, capacity):
+        td = TensorDigest([1], kernel=kernel, buffer_capacity=capacity)
         for value in range(100):
             td.update(np.array([float(value)], dtype=np.float32))
         assert td.quantile(0.0)[0] == pytest.approx(0.0)
         assert td.quantile(1.0)[0] == pytest.approx(99.0)
 
-    def test_zero_buffer_capacity_is_accepted(self):
-        td = TensorDigest([1], kernel="rankknot", buffer_capacity=0)
-        for value in range(100):
-            td.update(np.array([float(value)], dtype=np.float32))
-        assert td.quantile(0.0)[0] == pytest.approx(0.0)
-        assert td.quantile(1.0)[0] == pytest.approx(99.0)
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    def test_buffer_capacity_applies_to_blocks(self, kernel):
+        td = TensorDigest([2, 8], kernel=kernel, block_size=4, buffer_capacity=0)
+        for value in range(10):
+            td.update(np.full(16, float(value), dtype=np.float32))
+        assert td.quantile(1.0) == pytest.approx([9.0] * 4)
 
     def test_shape_is_still_positional(self):
         digest = TensorDigest([2, 3])

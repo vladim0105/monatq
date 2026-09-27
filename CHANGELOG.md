@@ -2,6 +2,18 @@
 
 Notable changes to `monatq` are documented in this file.
 
+## [Unreleased]
+
+### Breaking changes
+
+- `buffer_capacity` now counts new values per block before compression rather than tensor rows. The digest buffers `ceil(buffer_capacity / block_len)` rows, so elementwise digests behave as before. `0` disables buffering for any layout.
+- `TDigestConfig` gains `buffer_capacity: Option<usize>` (`None` keeps the previous `2 × compression`). Construct it with `TDigestConfig { compression: 100, ..Default::default() }`.
+
+### Changed
+
+- Blocked layouts no longer ignore `buffer_capacity`; small blocks are batched like elementwise digests, and blocks that one sample fills are compressed directly.
+- Python accepts `buffer_capacity` for `kernel="tdigest"`.
+
 ## [0.3.0]
 
 ### Breaking changes

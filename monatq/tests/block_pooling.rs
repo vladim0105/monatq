@@ -16,11 +16,19 @@ fn k_zero_matches_existing_behavior_for_both_kernels() {
         BlockConfig::new(0, 1),
     )
     .unwrap();
-    let mut td_old =
-        TensorDigest::<f32, TDigest>::with_config(&[2, 5, 2], TDigestConfig { compression: 40 });
+    let mut td_old = TensorDigest::<f32, TDigest>::with_config(
+        &[2, 5, 2],
+        TDigestConfig {
+            compression: 40,
+            ..Default::default()
+        },
+    );
     let mut td_new = TensorDigest::<f32, TDigest>::with_block_config(
         &[2, 5, 2],
-        TDigestConfig { compression: 40 },
+        TDigestConfig {
+            compression: 40,
+            ..Default::default()
+        },
         BlockConfig::new(0, 1),
     )
     .unwrap();
@@ -55,6 +63,8 @@ fn exercise_blocks<K: monatq::DigestKernel<f32>>(mut d: TensorDigest<f32, K>) {
     let mut outlier = sample(2);
     outlier[8] = 1.0e9;
     d.update(&outlier).unwrap();
+    d.flush();
+    d.flush();
 
     // The axis is split into balanced lengths three and two.
     assert_eq!(d.total_weight(0).unwrap(), 9);
@@ -163,6 +173,8 @@ fn assert_block_count_modes<K: monatq::DigestKernel<f32>>() {
     identity.update(&row).unwrap();
     one.update(&row).unwrap();
     clamped.update(&row).unwrap();
+    one.flush();
+    one.flush();
 
     assert_eq!(identity.shape(), &[2, 5]);
     assert_eq!(identity.blocks_per_axis(), 0);
@@ -199,6 +211,8 @@ fn assert_large_balanced_layout<K: monatq::DigestKernel<f32>>() {
     }
     row[8 * 2] = 10_000.0;
     digest.update(&row).unwrap();
+    digest.flush();
+    digest.flush();
 
     // The first compact block has nine axis positions; all remaining blocks have eight.
     assert_eq!(digest.total_weight(0).unwrap(), 9);
@@ -231,6 +245,7 @@ fn assert_uneven_block_merges_and_continuation<K: monatq::DigestKernel<f32>>() {
         }
     }
 
+    blocked.flush();
     assert_eq!(blocked.total_weight(0).unwrap(), 60);
     assert_eq!(blocked.total_weight(1).unwrap(), 40);
     let mut merged = blocked.merge_all().unwrap();
@@ -314,6 +329,10 @@ fn blocked_snapshot_roundtrip_preserves_layout_weights_and_queries() {
     td2.update(&sample(13)).unwrap();
     rk.update(&sample(13)).unwrap();
     td.update(&sample(13)).unwrap();
+    rk2.flush();
+    td2.flush();
+    rk2.flush();
+    td2.flush();
     assert_eq!(rk2.total_weight(0).unwrap(), 42);
     assert_eq!(td2.total_weight(6).unwrap(), 28);
     assert_eq!(

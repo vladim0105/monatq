@@ -91,10 +91,7 @@ accepted by `update`. Cell queries, `total_weight(idx)`, and merge selections al
 **block indices**, never original element indices. `total_weight` counts a block's pooled
 observations.
 
-When blocks pool multiple elements, updates process the input directly without retaining
-full tensor sample buffers. Elementwise layouts—including a requested count at least as
-large as the axis—retain normal buffering. Scratch memory scales with block size per active
-worker. Block settings survive snapshot round-trips. Merging combines whole blocks using
+Block settings survive snapshot round-trips. Merging combines whole blocks using
 their observation counts, including unequal-sized blocks. The visualizer displays the block
 grid directly. Elementwise tracking is simply the special case of one-element blocks.
 `block_size()` reports the requested size (`None` in balanced mode); `blocks_per_axis()`
@@ -103,14 +100,46 @@ reports the requested count in balanced mode and the effective count in size mod
 The snapshot format now records the grouping mode. Older RankKnot v5 / TDigest v4
 snapshots must be regenerated; incompatible versions are rejected explicitly.
 
+### Buffering and memory
+
+Both kernels accept `buffer_capacity`: the number of new values each block collects before
+it is compressed. The digest buffers `ceil(buffer_capacity / block_len)` whole tensor rows,
+so with one-element blocks it is simply the number of buffered samples. When one sample
+already fills a block, or `buffer_capacity` is `0`, samples are compressed immediately and
+no buffer is allocated. Larger values batch more work per compression; `0` uses the least
+memory. The defaults are 256 for RankKnot and `2 × compression` for TDigest.
+
+Total memory is approximately
+
+```text
+block_count × (S + 4 × buffer_capacity) bytes
+```
+
+where `block_count ≈ input_numel / block_len`, `S` is 216 bytes for RankKnot and about
+`48 × compression + 100` bytes (≈4,900) for TDigest, and the buffer term is zero when no
+buffer is allocated. This excludes the caller's input tensor and per-worker scratch. For a
+`[128256, 4096]` embedding tracked with RankKnot, elementwise tracking with the default
+buffer needs about 650 GB; blocks of 256 need about 0.45 GB.
+
+```rust
+use monatq::{BlockConfig, RankKnotConfig, TensorDigest};
+
+let mut digest = TensorDigest::<f32>::with_block_config(
+    &[128256, 4096],
+    RankKnotConfig { buffer_capacity: 0 },
+    BlockConfig::block_size(8, -1),
+)?;
+```
+
 ### Why RankKnot is the default
 
 RankKnot is a compact streaming rank summary designed for tensors with many independently
 tracked positions. For each position it retains at most 32 weighted `f32` knots, 16-bit
 probability masses, a mask for retained exact repeated-value intervals, and exact minimum
 and maximum sidecars. The knot summary occupies **208 bytes per position**, plus an 8-byte observation counter, compared with
-approximately **4,900 bytes** for the default TDigest configuration. Updates are buffered in
-256-row batches and positions are compressed independently in parallel with Rayon.
+approximately **4,900 bytes** for the default TDigest configuration. Updates are buffered
+until each position has 256 new values, and positions are compressed independently in
+parallel with Rayon.
 
 In the initial ten-workload accuracy suite, RankKnot had lower mean and maximum rank error
 than TDigest on nine workloads; TDigest won the 95%-zero activation case. A local Apple M4

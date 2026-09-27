@@ -422,7 +422,11 @@ mod tests {
         client.write_all(request.as_bytes()).unwrap();
         client.shutdown(Shutdown::Write).unwrap();
 
-        let mut digest = TDigestStorage::<f32>::new(shape, 100);
+        let mut digest = TDigestStorage::<f32>::with_layout(
+            crate::block::BlockLayout::default_for(shape),
+            100,
+            200,
+        );
         let distributions = vec![Distribution::Normal; shape.iter().product()];
         handle(&server, shape, &distributions, &mut digest);
         drop(server);
@@ -443,7 +447,7 @@ mod tests {
 
         let layout =
             crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::new(2, 1)).unwrap();
-        let mut digest = TDigestStorage::<f32>::with_layout(layout, 100);
+        let mut digest = TDigestStorage::<f32>::with_layout(layout, 100, 200);
         digest.update(&(0..20).map(|value| value as f32).collect::<Vec<_>>());
         let shape = <TDigestStorage<f32> as StorageOperations<f32>>::shape(&digest).to_vec();
         let distributions = digest.analyze();

@@ -177,27 +177,9 @@ impl BlockLayout {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// Flat input positions of `block` as `(first, stride, len)`.
     #[inline]
-    pub(crate) fn block_of(&self, flat: usize) -> usize {
-        if self.is_elementwise() {
-            return flat;
-        }
-        let inner_pos = flat % self.inner;
-        let axis_coord = (flat / self.inner) % self.axis_len;
-        let outer = flat / (self.inner * self.axis_len);
-        let threshold = self.larger_blocks * self.base_block_len + self.larger_blocks;
-        let block_axis = if let Grouping::Size(size) = self.grouping {
-            axis_coord / size
-        } else if axis_coord < threshold {
-            axis_coord / (self.base_block_len + 1)
-        } else {
-            self.larger_blocks + (axis_coord - threshold) / self.base_block_len
-        };
-        (outer * self.blocks_axis + block_axis) * self.inner + inner_pos
-    }
-
-    pub(crate) fn indices(&self, block: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn span(&self, block: usize) -> (usize, usize, usize) {
         let inner_pos = block % self.inner;
         let t = block / self.inner;
         let block_axis = if self.blocks_axis == 0 {
@@ -211,8 +193,30 @@ impl BlockLayout {
             t / self.blocks_axis
         };
         let (start_axis, len) = self.axis_range(block_axis);
-        (start_axis..start_axis + len)
-            .map(move |a| (outer * self.axis_len + a) * self.inner + inner_pos)
+        (
+            (outer * self.axis_len + start_axis) * self.inner + inner_pos,
+            self.inner,
+            len,
+        )
+    }
+
+    /// Length of the largest block; remainder blocks may be shorter.
+    pub(crate) fn max_block_len(&self) -> usize {
+        let len = match self.grouping {
+            Grouping::Size(size) => size.min(self.axis_len),
+            Grouping::Count(_) => self.base_block_len + usize::from(self.larger_blocks > 0),
+        };
+        len.max(1)
+    }
+
+    /// Tensor rows to buffer so each full-size block collects `values_per_block` new values
+    /// before compression. Zero means process every sample directly: buffering a single row
+    /// would only add a copy.
+    pub(crate) fn buffer_rows(&self, values_per_block: usize) -> usize {
+        match values_per_block.div_ceil(self.max_block_len()) {
+            0 | 1 => 0,
+            rows => rows,
+        }
     }
 
     fn axis_range(&self, block_axis: usize) -> (usize, usize) {
@@ -235,9 +239,6 @@ impl BlockLayout {
         }
     }
 
-    pub(crate) fn is_elementwise(&self) -> bool {
-        self.blocks_axis == self.axis_len
-    }
     pub(crate) fn input_numel(&self) -> usize {
         self.input_numel
     }
@@ -265,49 +266,70 @@ impl BlockLayout {
 mod tests {
     use super::*;
 
+    /// Every input position belongs to exactly one block, and each block stays within the
+    /// outer and inner coordinates its compact index names.
+    fn assert_partition(layout: &BlockLayout) {
+        let mut visits = vec![0; layout.input_numel()];
+        for block in 0..layout.block_count() {
+            let (start, stride, len) = layout.span(block);
+            assert_eq!(stride, layout.inner);
+            assert_eq!(start % layout.inner, block % layout.inner);
+            assert_eq!(
+                start / (layout.inner * layout.axis_len),
+                block / (layout.inner * layout.blocks_axis)
+            );
+            for k in 0..len {
+                visits[start + k * stride] += 1;
+            }
+        }
+        assert!(visits.iter().all(|&count| count == 1));
+    }
+
     #[test]
     fn largest_axis_can_map_to_one_block_without_overflow() {
         let layout = BlockLayout::new(&[usize::MAX], BlockConfig::new(1, 0)).unwrap();
-        assert_eq!(layout.block_of(0), 0);
-        assert_eq!(layout.block_of(usize::MAX - 1), 0);
+        assert_eq!(layout.span(0), (0, 1, usize::MAX));
+    }
+
+    #[test]
+    fn buffer_rows_fill_the_largest_block() {
+        let rows = |shape: &[usize], config, capacity| {
+            BlockLayout::new(shape, config)
+                .unwrap()
+                .buffer_rows(capacity)
+        };
+        assert_eq!(rows(&[4, 16], BlockConfig::default(), 256), 256);
+        assert_eq!(rows(&[4, 16], BlockConfig::block_size(8, 1), 256), 32);
+        assert_eq!(rows(&[4, 16], BlockConfig::block_size(3, 1), 7), 3);
+        assert_eq!(rows(&[4, 16], BlockConfig::block_size(8, 1), 8), 0);
+        assert_eq!(rows(&[4, 16], BlockConfig::block_size(64, 1), 16), 0);
+        assert_eq!(rows(&[4, 16], BlockConfig::block_size(64, 1), 32), 2);
+        assert_eq!(rows(&[4, 17], BlockConfig::blocks_per_axis(4, 1), 10), 2);
+        assert_eq!(rows(&[4, 16], BlockConfig::default(), 0), 0);
+        assert_eq!(rows(&[4, 0], BlockConfig::default(), 4), 4);
     }
 
     #[test]
     fn fixed_size_mapping_covers_every_position_once() {
         for length in 0..40 {
             for size in 1..45 {
-                let layout =
-                    BlockLayout::new(&[2, length, 3], BlockConfig::block_size(size, 1)).unwrap();
-                let mut visits = vec![0; layout.input_numel()];
-                for block in 0..layout.block_count() {
-                    for element in layout.indices(block) {
-                        assert_eq!(layout.block_of(element), block);
-                        visits[element] += 1;
-                    }
-                }
-                assert!(visits.iter().all(|&count| count == 1));
+                assert_partition(
+                    &BlockLayout::new(&[2, length, 3], BlockConfig::block_size(size, 1)).unwrap(),
+                );
             }
         }
         let layout =
             BlockLayout::new(&[usize::MAX], BlockConfig::block_size(usize::MAX - 1, 0)).unwrap();
-        assert_eq!(layout.block_of(usize::MAX - 1), 1);
-        assert_eq!(layout.indices(1).collect::<Vec<_>>(), vec![usize::MAX - 1]);
+        assert_eq!(layout.span(1), (usize::MAX - 1, 1, 1));
     }
 
     #[test]
     fn balanced_mapping_covers_every_position_once() {
         for length in 1..40 {
             for requested in 0..45 {
-                let layout =
-                    BlockLayout::new(&[2, length, 3], BlockConfig::new(requested, 1)).unwrap();
-                let mut visits = vec![0; layout.input_numel()];
-                for block in 0..layout.block_count() {
-                    for element in layout.indices(block) {
-                        assert_eq!(layout.block_of(element), block);
-                        visits[element] += 1;
-                    }
-                }
-                assert!(visits.iter().all(|&count| count == 1));
+                assert_partition(
+                    &BlockLayout::new(&[2, length, 3], BlockConfig::new(requested, 1)).unwrap(),
+                );
             }
         }
     }

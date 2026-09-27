@@ -22,7 +22,7 @@ use monatq::TensorDigest;
 let mut digest = TensorDigest::<f32>::new(&[3, 4]);
 ```
 
-Use an explicit configuration to change the number of buffered rows:
+Use an explicit configuration to change how many new values each block collects before compression:
 
 ```rust
 use monatq::{RankKnotConfig, TensorDigest};
@@ -77,7 +77,9 @@ Each position stores:
 
 Each statistical state also has an 8-byte `u64` observation counter. A separate storage-wide `u64` counts accepted tensor samples. These differ in blockwise mode: a block receives one observation per contained element per tensor sample. Balanced block sizes differ by at most one.
 
-In element-wise mode, the default input buffer holds 256 complete tensor rows. For `f32`, that adds 1,024 bytes per position while collecting. Blockwise mode does not retain this buffer. Worker-local sorting and merge vectors are temporary and scale with the incoming batch or block size per active Rayon worker.
+The input buffer holds enough complete tensor rows for each full-size block to collect `buffer_capacity` new values: `ceil(buffer_capacity / block_len)` rows. With one-element blocks and the default capacity, that is 256 rows, or 1,024 bytes per position for `f32`. When one row already fills a block, or `buffer_capacity` is zero, no buffer is allocated. Worker-local sorting and merge vectors are temporary and scale with the incoming values per block per active Rayon worker.
+
+Total memory is approximately `block_count × (216 + 4 × buffer_capacity)` bytes, where the buffer term is zero when no buffer is allocated. It excludes the caller's input tensor and worker scratch.
 
 Both supported input types are summarized at `f32` resolution. An `i32` magnitude above 2^24 may therefore round to the nearest representable `f32`; TDigest has the same crate-level output limitation.
 
@@ -85,11 +87,9 @@ Both supported input types are summarized at `f32` resolution. An `i32` magnitud
 
 `update` first checks that the sample contains exactly `input_numel` values. A shape mismatch returns `Error::ShapeMismatch` without modifying the digest. Valid samples are copied into the row buffer.
 
-Setting `buffer_capacity` to `0` bypasses the input buffer and updates immediately on every sample.
+When no buffer is allocated, each sample is compressed immediately. Otherwise, when the buffer is full, or a query explicitly flushes it, each block is processed independently in parallel:
 
-When the buffer reaches a positive `buffer_capacity`, or a query explicitly flushes it, each tensor position is processed independently in parallel:
-
-1. Gather the position's buffered column into worker-local `f32` scratch.
+1. Gather the block's buffered values into worker-local `f32` scratch.
 2. Sort the incoming values.
 3. Linearly merge them with the position's existing weighted support.
 4. Coalesce equal values and preserve purity only when every contribution is pure.
@@ -98,7 +98,7 @@ When the buffer reaches a positive `buffer_capacity`, or a query explicitly flus
 7. Prefix-round cumulative probability onto the 0–65,535 mass scale using ties-to-even.
 8. Update the exact encoded extrema.
 
-In element-wise mode with the default configuration, compression sees at most 256 new values plus 32 existing representatives per position.
+With the default configuration, each compression of a full-size block sees at least 256 new values plus 32 existing representatives, whatever the block size.
 
 ### Blockwise ingestion
 
@@ -106,7 +106,7 @@ In element-wise mode with the default configuration, compression sees at most 25
 
 Alternatively, `BlockConfig::blocks_per_axis(count, axis)` requests balanced groups. Zero means elementwise. A positive count is clamped to the axis length. For axis length L and effective count B, the first L % B blocks have L / B + 1 elements and the remaining blocks have L / B elements. For L = 129 and B = 16, sizes are 9 followed by fifteen 8s. The older `BlockConfig::new(count, axis)` constructor is an alias for this mode.
 
-Axes are signed in both Rust and Python: `-1` selects the last input dimension. The shared Rust layout resolves and validates the axis once; queries and snapshots use the normalized nonnegative index. Groups never cross the other axes. Layouts with one element per block follow the existing element-wise buffering path. Pooled layouts bypass the row buffer and process every input block directly on each update. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
+Axes are signed in both Rust and Python: `-1` selects the last input dimension. The shared Rust layout resolves and validates the axis once; queries and snapshots use the normalized nonnegative index. Groups never cross the other axes. Buffering follows the same rule for every block length, as described above. All raw values enter the shared tracker, not their average. Each block's observation counter supplies the old population weight during compression.
 
 `shape()` describes the atomic block grid and `block_count()` gives its total number of blocks. `input_shape()` and `input_numel()` describe the original input geometry used by ingestion. Bulk queries return one entry per block; cell queries and merge selections use flat block indices directly. Visualization displays the same block grid.
 

@@ -141,6 +141,7 @@ pub(crate) struct RankKnotStorage<T> {
     layout: BlockLayout,
     config: RankKnotConfig,
     row_buffer: Vec<T>,
+    buffer_rows: usize,
     n_buffered: usize,
     sample_count: u64,
     state_weights: Vec<u64>,
@@ -153,21 +154,17 @@ impl<T: TensorValue> RankKnotStorage<T> {
     }
 
     pub(crate) fn with_layout(layout: BlockLayout, config: RankKnotConfig) -> Self {
-        let input_numel = layout.input_numel();
-        // Element-wise mode keeps its historical batched path. Block mode processes each
-        // sample directly, bounding temporary storage by one block rather than many tensors.
-        let buffer_len = if layout.is_elementwise() {
-            input_numel
-                .checked_mul(config.buffer_capacity)
-                .expect("row buffer size overflow")
-        } else {
-            0
-        };
+        let buffer_rows = layout.buffer_rows(config.buffer_capacity);
+        let buffer_len = layout
+            .input_numel()
+            .checked_mul(buffer_rows)
+            .expect("row buffer size overflow");
         let state_count = layout.block_count();
         Self {
             layout,
             config,
             row_buffer: vec![T::from_f32(0.0); buffer_len],
+            buffer_rows,
             n_buffered: 0,
             sample_count: 0,
             state_weights: vec![0; state_count],
@@ -185,19 +182,21 @@ impl<T: TensorValue> RankKnotStorage<T> {
         rows: usize,
     ) {
         let input_numel = layout.input_numel();
+        let values_per_block = rows * layout.max_block_len();
         states
             .par_iter_mut()
             .zip(state_weights.par_iter_mut())
             .with_min_len(64)
             .enumerate()
             .for_each_init(
-                || RankKnotScratch::new(rows),
+                || RankKnotScratch::new(values_per_block),
                 |scratch, (position, (state, weight))| {
                     scratch.incoming.clear();
+                    let (start, stride, len) = layout.span(position);
                     for row in data.chunks_exact(input_numel) {
                         scratch
                             .incoming
-                            .extend(layout.indices(position).map(|i| row[i].to_f32()));
+                            .extend((0..len).map(|k| row[start + k * stride].to_f32()));
                     }
                     scratch
                         .incoming
@@ -606,7 +605,7 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     fn update(&mut self, data: &[T]) -> Result<()> {
         let input_numel = self.layout.input_numel();
         check_sample_len(data.len(), input_numel)?;
-        if self.config.buffer_capacity == 0 || !self.layout.is_elementwise() {
+        if self.buffer_rows == 0 {
             Self::process_batch(
                 &self.layout,
                 &mut self.states,
@@ -620,7 +619,7 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
         let start = self.n_buffered * input_numel;
         self.row_buffer[start..start + input_numel].copy_from_slice(data);
         self.n_buffered += 1;
-        if self.n_buffered == self.config.buffer_capacity {
+        if self.n_buffered == self.buffer_rows {
             self.flush();
         }
         Ok(())
@@ -1096,6 +1095,31 @@ mod tests {
         storage.update(&vec![1.0; 4096]).unwrap();
         assert!(storage.row_buffer.is_empty());
         assert_eq!(storage.n_buffered, 0);
+    }
+
+    #[test]
+    fn small_blocks_buffer_enough_rows_to_fill_capacity() {
+        let layout = BlockLayout::new(&[2, 8], crate::BlockConfig::block_size(4, 1)).unwrap();
+        let mut storage =
+            RankKnotStorage::<f32>::with_layout(layout, RankKnotConfig { buffer_capacity: 8 });
+        assert_eq!(storage.buffer_rows, 2);
+        assert_eq!(storage.row_buffer.len(), 32);
+        storage.update(&[1.0; 16]).unwrap();
+        assert_eq!(storage.n_buffered, 1);
+        assert_eq!(storage.state_weights, vec![0; 4]);
+        storage.update(&[2.0; 16]).unwrap();
+        assert_eq!(storage.n_buffered, 0);
+        assert_eq!(storage.state_weights, vec![8; 4]);
+    }
+
+    #[test]
+    fn zero_capacity_disables_buffer_for_blocks() {
+        let layout = BlockLayout::new(&[2, 8], crate::BlockConfig::block_size(4, 1)).unwrap();
+        let mut storage =
+            RankKnotStorage::<f32>::with_layout(layout, RankKnotConfig { buffer_capacity: 0 });
+        assert!(storage.row_buffer.is_empty());
+        storage.update(&[1.0; 16]).unwrap();
+        assert_eq!(storage.state_weights, vec![4; 4]);
     }
 
     #[test]

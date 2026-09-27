@@ -43,11 +43,15 @@ per tensor position; `"tdigest"` is the original.
 TensorDigest(shape=[3, 4])                                  # rankknot
 TensorDigest(shape=[3, 4], buffer_capacity=512)             # rankknot, tuned
 TensorDigest(shape=[3, 4], kernel="tdigest", compression=100)
+TensorDigest(shape=[4096, 4096], block_size=8, buffer_capacity=0)  # least memory
 ```
 
-The tuning knobs are kernel-specific: `compression` belongs to `"tdigest"` and
-`buffer_capacity` to `"rankknot"`. Passing one to the wrong kernel raises `ValueError`
-rather than being silently ignored.
+`buffer_capacity` works with both kernels. It is the number of new values each block
+collects before compression; the digest buffers `ceil(buffer_capacity / block_size)` whole
+tensor rows, and `0` disables buffering. Total memory is roughly
+`block_count × (S + 4 × buffer_capacity)` bytes, with `S` = 216 for RankKnot and about 4,900
+for the default TDigest. `compression` belongs to `"tdigest"`; passing it to `"rankknot"`
+raises `ValueError` rather than being silently ignored.
 
 Everything after `shape` is keyword-only. Code written against the previous
 `TensorDigest(shape, compression)` positional form needs
