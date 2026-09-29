@@ -143,8 +143,8 @@ fn without_zeros_on_an_all_zero_position_yields_an_empty_summary() {
 
 #[test]
 fn without_zeros_survives_a_snapshot_round_trip() {
-    // The filtered digest renormalises masses, so it must still satisfy the snapshot
-    // invariants that `from_payload` validates.
+    // The filtered digest keeps fewer counts than its observation weight, so it must still
+    // satisfy the snapshot invariants that `from_payload` validates.
     let mut td = TensorDigest::<f32, RankKnot>::new(&[2]);
     for step in 0..300 {
         let v = (step % 7) as f32 - 3.0;

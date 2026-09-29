@@ -120,7 +120,10 @@ it is compressed. The digest buffers `ceil(buffer_capacity / block_len)` whole t
 so with one-element blocks it is simply the number of buffered samples. When one sample
 already fills a block, or `buffer_capacity` is `0`, samples are compressed immediately and
 no buffer is allocated. Larger values batch more work per compression; `0` uses the least
-memory. The defaults are 256 for RankKnot and `2 × compression` for TDigest.
+memory. The defaults are 16 for RankKnot and `2 × compression` for TDigest. RankKnot's
+default keeps the buffer (64 bytes per block) well below its 280-byte summary state.
+RankKnot's accuracy does not depend on `buffer_capacity`, so for it this is purely a
+memory-versus-throughput setting.
 
 Total memory is approximately
 
@@ -128,11 +131,12 @@ Total memory is approximately
 block_count × (S + 4 × buffer_capacity) bytes
 ```
 
-where `block_count ≈ numel / block_len`, `S` is 216 bytes for RankKnot and about
+where `block_count ≈ numel / block_len`, `S` is 280 bytes for RankKnot and about
 `48 × compression + 100` bytes (≈4,900) for TDigest, and the buffer term is zero when no
 buffer is allocated. This excludes the caller's input tensor and per-worker scratch. For a
 `[128256, 4096]` embedding tracked with RankKnot, elementwise tracking with the default
-buffer needs about 650 GB; blocks of 256 need about 0.45 GB.
+buffer needs about 181 GB; blocks of 8 need about 23 GB (18 GB with `buffer_capacity: 0`);
+blocks of 256 need about 0.57 GB.
 
 ```rust
 use monatq::{BlockConfig, RankKnotConfig, TensorDigest};
@@ -147,16 +151,16 @@ let mut digest = TensorDigest::<f32>::with_block_config(
 ### Why RankKnot is the default
 
 RankKnot is a compact streaming rank summary designed for tensors with many independently
-tracked positions. For each position it retains at most 32 weighted `f32` knots, 16-bit
-probability masses, a mask for retained exact repeated-value intervals, and exact minimum
-and maximum sidecars. The knot summary occupies **208 bytes per position**, plus an 8-byte observation counter, compared with
+tracked positions. For each position it retains at most 32 `f32` knots, a 32-bit
+observation count per knot, a mask for retained exact repeated-value intervals, and exact minimum
+and maximum sidecars. The knot summary occupies **272 bytes per position**, plus an 8-byte observation counter, compared with
 approximately **4,900 bytes** for the default TDigest configuration. Updates are buffered
-until each position has 256 new values, and positions are compressed independently in
+until each position has 16 new values, and positions are compressed independently in
 parallel with Rayon.
 
 In the initial ten-workload accuracy suite, RankKnot had lower mean and maximum rank error
 than TDigest on nine workloads; TDigest won the 95%-zero activation case. A local Apple M4
-run measured about 78% less retained heap and 81% less peak heap for RankKnot. Tensor-wide
+run measured about 94% less retained heap and 95% less peak heap for RankKnot. Tensor-wide
 RankKnot merges had lower mean and maximum error than TDigest on all ten representative
 workloads.
 
@@ -170,7 +174,7 @@ and limitations.
 
 | Kernel | Element types | Contract |
 | --- | --- | --- |
-| `RankKnot` *(default)* | `f32`, `i32` | complete; 208 B of state per position |
+| `RankKnot` *(default)* | `f32`, `i32` | complete; 272 B of state per position |
 | `TDigest` | `f32`, `i32` | complete; ~4,900 B of state per position |
 
 Every kernel is selected statically, so there is no runtime dispatch cost. Name one

@@ -233,9 +233,8 @@ fn obsolete_and_wrong_version_snapshots_are_rejected() {
             );
         }
     }
-    for version in [0_u16, 4, 5, 7, u16::MAX] {
-        let header =
-            bincode2::serialize(&(0x52_u8, version, 32_u32, u16::MAX as u64, 0_u8)).unwrap();
+    for version in [0_u16, 4, 5, 6, u16::MAX] {
+        let header = bincode2::serialize(&(0x52_u8, version, 32_u32, 0_u8)).unwrap();
         let bytes = zstd::encode_all(header.as_slice(), 3).unwrap();
         for error in [
             monatq::from_bytes(&bytes).unwrap_err(),

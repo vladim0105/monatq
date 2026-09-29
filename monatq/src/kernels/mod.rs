@@ -30,7 +30,7 @@ pub struct RankKnotConfig {
 impl Default for RankKnotConfig {
     fn default() -> Self {
         Self {
-            buffer_capacity: 256,
+            buffer_capacity: 16,
         }
     }
 }

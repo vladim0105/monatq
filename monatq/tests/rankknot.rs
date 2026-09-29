@@ -338,9 +338,9 @@ fn merged_digests_keep_accepting_updates() {
 }
 
 #[test]
-fn default_buffer_capacity_is_256() {
+fn default_buffer_capacity_is_16() {
     let digest = TensorDigest::<f32, RankKnot>::new(&[17]);
-    assert_eq!(digest.config().buffer_capacity, 256);
+    assert_eq!(digest.config().buffer_capacity, 16);
 }
 
 #[test]
