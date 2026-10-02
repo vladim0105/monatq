@@ -53,7 +53,7 @@ class TestConstruction:
     def test_shape_preserved(self):
         td = TensorDigest([2, 3, 4], kernel="tdigest", compression=50)
         assert td.shape == [2, 3, 4]
-        assert td.numel == 24
+        assert td.block_count == 24
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ class TestFloat32:
     def test_multidim_shape(self):
         td = TensorDigest([2, 3], kernel="tdigest", compression=50)
         td.update(np.zeros((2, 3), dtype=np.float32))
-        assert td.numel == 6
+        assert td.block_count == 6
 
     def test_wrong_numel_raises(self):
         td = TensorDigest([3], kernel="tdigest", compression=100)
@@ -142,7 +142,7 @@ class TestInt32:
     def test_multidim_shape(self):
         td = TensorDigest([2, 3], kernel="tdigest", compression=50, dtype="int32")
         td.update(np.zeros((2, 3), dtype=np.int32))
-        assert td.numel == 6
+        assert td.block_count == 6
 
     def test_wrong_numel_raises(self):
         td = TensorDigest([3], kernel="tdigest", compression=100, dtype="int32")
@@ -220,7 +220,7 @@ class TestSaveLoad:
             td.save(path)
             loaded = TensorDigest.load(path)
             assert loaded.shape == [2, 3]
-            assert loaded.numel == 6
+            assert loaded.block_count == 6
         finally:
             os.unlink(path)
 

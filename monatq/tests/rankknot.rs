@@ -338,9 +338,9 @@ fn merged_digests_keep_accepting_updates() {
 }
 
 #[test]
-fn default_buffer_capacity_is_256() {
+fn default_buffer_capacity_is_16() {
     let digest = TensorDigest::<f32, RankKnot>::new(&[17]);
-    assert_eq!(digest.config().buffer_capacity, 256);
+    assert_eq!(digest.config().buffer_capacity, 16);
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn snapshot_roundtrip_preserves_queries_extrema_and_count() {
         TensorDigest::<f32, RankKnot>::from_bytes(&bytes).expect("deserialization failed");
 
     assert_eq!(loaded.shape(), original.shape());
-    assert_eq!(loaded.numel(), original.numel());
+    assert_eq!(loaded.block_count(), original.block_count());
     assert_eq!(loaded.sample_count(), original.sample_count());
     assert_eq!(loaded.quantiles(&qs), expected);
     assert_eq!(loaded.min(), expected_min);

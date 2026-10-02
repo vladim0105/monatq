@@ -1,6 +1,6 @@
 # monatq (Python)
 
-Python bindings for [monatq](https://github.com/vladim0105/monatq) — approximate quantile tracking for tensors using T-Digest, with element-wise parallel updates.
+Python bindings for [monatq](https://github.com/vladim0105/monatq) — approximate quantile tracking for tensors with element-wise or axis-local block updates.
 
 ## Installation
 
@@ -43,15 +43,82 @@ per tensor position; `"tdigest"` is the original.
 TensorDigest(shape=[3, 4])                                  # rankknot
 TensorDigest(shape=[3, 4], buffer_capacity=512)             # rankknot, tuned
 TensorDigest(shape=[3, 4], kernel="tdigest", compression=100)
+TensorDigest(shape=[4096, 4096], block_size=8, buffer_capacity=0)  # least memory
 ```
 
-The tuning knobs are kernel-specific: `compression` belongs to `"tdigest"` and
-`buffer_capacity` to `"rankknot"`. Passing one to the wrong kernel raises `ValueError`
-rather than being silently ignored.
+`buffer_capacity` works with both kernels. It is the number of new values each block
+collects before compression; the digest buffers `ceil(buffer_capacity / block_size)` whole
+tensor rows, and `0` disables buffering. Total memory is roughly
+`block_count × (S + 4 × buffer_capacity)` bytes, with `S` = 280 for RankKnot and about 4,900
+for the default TDigest. `compression` belongs to `"tdigest"`; passing it to `"rankknot"`
+raises `ValueError` rather than being silently ignored.
 
 Everything after `shape` is keyword-only. Code written against the previous
 `TensorDigest(shape, compression)` positional form needs
 `TensorDigest(shape, kernel="tdigest", compression=...)`.
+
+### Blockwise tracking
+
+Use `BlockConfig` to choose either a fixed size or a requested count of groups along one
+axis. The constructor is keyword-only and requires exactly one mode:
+
+```python
+from monatq import BlockConfig, TensorDigest
+
+# Fixed-size groups: 64, 64, then a short final group of 1.
+digest = TensorDigest(
+    shape=[256, 129, 2],
+    blocks=BlockConfig(block_size=64, axis=1),
+)
+assert digest.shape == [256, 129, 2]        # original input shape
+assert digest.block_shape == [256, 3, 2]    # atomic block grid
+assert digest.block_config == BlockConfig(block_size=64, axis=1)
+
+# A requested count instead makes balanced groups (9 values, then groups of 8).
+balanced = TensorDigest(
+    shape=[256, 129, 2],
+    blocks=BlockConfig(blocks_per_axis=16, axis=1),
+)
+assert balanced.block_shape == [256, 16, 2]
+
+assert TensorDigest(shape=[256, 129, 2]).block_config is None  # elementwise
+```
+
+Both kernels support both modes. `axis` defaults to `-1` and accepts negative indices,
+just like Rust's `BlockConfig`. Both `block_size` and `blocks_per_axis` must be positive;
+omit block arguments entirely for elementwise tracking, the default.
+
+`digest.block_config` returns the grouping in resolved form, including after snapshot
+loading: `axis` is the nonnegative index, and `blocks_per_axis` is the effective count after
+clamping to the axis length. It is `None` for elementwise digests. The effective number of
+groups along the axis is always `block_shape[axis]`.
+
+Blocks are one-dimensional and local to each axis-line: they never cross another axis.
+Every raw value contributes directly to its block digest; values are not averaged first.
+For fixed-size mode, the last group is shorter when the axis length has a remainder. For
+count mode, group lengths differ by at most one, and requested counts above the axis
+length produce one-element groups.
+
+As a shorthand for `blocks=`, pass `block_size=` or `blocks_per_axis=` directly, optionally
+with `block_axis=`:
+
+```python
+TensorDigest([256, 129, 2], block_size=64, block_axis=1)
+```
+
+Do not combine `blocks=...` with the shorthand arguments, specify both size and count
+modes, or pass `block_axis=` alone; these raise `ValueError`.
+
+`update` accepts the complete original tensor described by `shape` and `numel`, which
+always report the shape passed at construction. Every downstream operation uses blocks:
+quantile and analysis outputs contain one entry per block (`block_count` entries, in
+`block_shape` row-major order), cell queries accept flat block indices, and merge selections identify whole
+blocks. Merging uses actual observation counts, including unequal-sized blocks, and the
+visualizer displays the block grid.
+
+When blocks pool multiple elements, updates do not retain full tensor sample buffers.
+Elementwise layouts retain normal buffering. Snapshots preserve the block mode and its
+settings for both kernels.
 
 ### Snapshots
 
@@ -61,6 +128,8 @@ restored = TensorDigest.from_bytes(blob)
 restored.kernel        # "rankknot"
 restored.dtype         # "float32"
 ```
+
+Only the current snapshot format is supported. Regenerate snapshots written by older builds.
 
 ### Sparse tensors
 

@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 
 use crate::{
-    Result, TensorValue,
-    kernels::{self, DigestKernel, QuantileSpine, RankKnot},
+    BlockConfig, Result, TensorValue,
+    kernels::{self, DigestKernel, RankKnot},
 };
 
 /// Operations shared by every kernel-specific storage layout.
@@ -10,8 +10,11 @@ use crate::{
 /// This trait is crate-private so storage remains an implementation detail while the
 /// public container can provide one statically dispatched implementation of its common API.
 pub(crate) trait StorageOperations<T: TensorValue>: Sized {
-    fn numel(&self) -> usize;
     fn shape(&self) -> &[usize];
+    fn numel(&self) -> usize;
+    fn block_shape(&self) -> &[usize];
+    fn block_count(&self) -> usize;
+    fn block_config(&self) -> BlockConfig;
     fn total_weight(&self, idx: usize) -> Result<u32>;
     fn update(&mut self, data: &[T]) -> Result<()>;
     fn flush(&mut self);
@@ -68,7 +71,7 @@ impl<T: TensorValue, K: DigestKernel<T>> std::fmt::Debug for TensorDigest<T, K> 
         formatter
             .debug_struct("TensorDigest")
             .field("shape", &self.shape())
-            .field("numel", &self.numel())
+            .field("block_shape", &self.block_shape())
             .finish_non_exhaustive()
     }
 }
@@ -84,6 +87,21 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
         Self::from_storage(K::create_storage(shape, config))
     }
 
+    /// Construct a digest with one-dimensional axis-local groups, selected by size or count.
+    /// The axis, the positive size or count, and the resulting layout are validated.
+    pub fn with_block_config(
+        shape: &[usize],
+        config: K::Config,
+        blocks: BlockConfig,
+    ) -> Result<Self> {
+        K::create_block_storage(shape, config, blocks).map(Self::from_storage)
+    }
+
+    /// Construct a blocked digest with the kernel's default configuration.
+    pub fn with_blocks(shape: &[usize], blocks: BlockConfig) -> Result<Self> {
+        Self::with_block_config(shape, K::Config::default(), blocks)
+    }
+
     pub(crate) fn from_storage(storage: <K as kernels::sealed::Kernel<T>>::Storage) -> Self {
         Self {
             storage,
@@ -91,19 +109,41 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
         }
     }
 
+    /// Shape of the tensors accepted by [`Self::update`], as passed at construction.
+    ///
+    /// For a blocked digest, query results follow [`Self::block_shape`] instead.
+    pub fn shape(&self) -> &[usize] {
+        self.storage.shape()
+    }
+
     /// Total number of elements (the product of the shape dimensions).
     pub fn numel(&self) -> usize {
         self.storage.numel()
     }
 
-    /// Shape of the tensors tracked by this digest.
-    pub fn shape(&self) -> &[usize] {
-        self.storage.shape()
+    /// Compact row-major atomic-block shape used by queries, selections, and merges.
+    ///
+    /// Equal to [`Self::shape`] for an elementwise digest.
+    pub fn block_shape(&self) -> &[usize] {
+        self.storage.block_shape()
     }
 
-    /// Total flushed sample weight at one flat-indexed element.
+    /// Number of independently tracked statistical blocks (the product of
+    /// [`Self::block_shape`]).
+    pub fn block_count(&self) -> usize {
+        self.storage.block_count()
+    }
+
+    /// The block grouping in resolved form: the axis is a nonnegative index, and a count is
+    /// the effective count after clamping to the axis length. A size is reported as
+    /// requested; the effective number of groups along the axis is `block_shape()[axis]`.
+    pub fn block_config(&self) -> BlockConfig {
+        self.storage.block_config()
+    }
+
+    /// Total flushed observation weight for an atomic block.
     ///
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
+    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid block index.
     pub fn total_weight(&self, idx: usize) -> Result<u32> {
         self.storage.total_weight(idx)
     }
@@ -114,7 +154,8 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     /// [`Self::numel`] elements. The digest is left untouched in that case.
     ///
     /// NaN input is a documented precondition rather than a checked one: it is not rejected
-    /// here and will panic during a later flush.
+    /// here and will panic during compression (during update in direct/block mode, otherwise
+    /// during a later flush).
     pub fn update(&mut self, data: &[T]) -> Result<()> {
         self.storage.update(data)
     }
@@ -124,27 +165,26 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
         self.storage.flush()
     }
 
-    /// Compute one quantile at every tensor position.
+    /// Compute one quantile per statistical block, in compact row-major block shape.
     pub fn quantile(&mut self, q: f32) -> Vec<f32> {
         self.storage.quantile(q)
     }
 
-    /// Compute several quantiles at every tensor position.
+    /// Compute several quantiles per statistical block.
     pub fn quantiles(&mut self, qs: &[f32]) -> Vec<Vec<f32>> {
         self.storage.quantiles(qs)
     }
 
-    /// Compute several quantiles for one flat-indexed tensor position.
+    /// Compute several quantiles for one atomic block index.
     ///
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
+    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid block index.
     pub fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Result<Vec<f32>> {
         self.storage.cell_quantiles(idx, qs)
     }
 
-    /// Merge selected flat-indexed tensor positions into a one-position digest.
+    /// Merge selected atomic blocks into a scalar digest.
     ///
-    /// Fails with [`crate::Error::Unsupported`] if the selected kernel does not implement
-    /// merging, or [`crate::Error::IndexOutOfBounds`] for an invalid position.
+    /// Fails with [`crate::Error::IndexOutOfBounds`] for an invalid block index.
     pub fn merge_cells(&mut self, indices: &[usize]) -> Result<Self> {
         self.storage.merge_cells(indices).map(Self::from_storage)
     }
@@ -159,15 +199,12 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
             .map(Self::from_storage)
     }
 
-    /// Merge every tensor position into a one-position digest.
-    ///
-    /// Fails with [`crate::Error::Unsupported`] if the selected kernel does not implement
-    /// merging.
+    /// Merge every atomic block exactly once into a scalar digest.
     pub fn merge_all(&mut self) -> Result<Self> {
         self.storage.merge_all().map(Self::from_storage)
     }
 
-    /// Analyze the distribution at every tensor position.
+    /// Analyze the distribution of every statistical block, in compact row-major order.
     ///
     /// Fails with [`crate::Error::Unsupported`] if the selected kernel does not implement
     /// analysis.
@@ -246,89 +283,25 @@ impl<T: TensorValue> TensorDigest<T, RankKnot> {
         self.storage.config()
     }
 
+    /// Minimum for each statistical block, in compact row-major order.
     pub fn min(&mut self) -> Vec<f32> {
         self.storage.min()
     }
 
+    /// Maximum for each statistical block, in compact row-major order.
     pub fn max(&mut self) -> Vec<f32> {
         self.storage.max()
     }
 
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
+    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid block index.
     pub fn cell_min(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
+        crate::error::check_index(idx, self.block_count())?;
         Ok(self.storage.cell_min(idx))
     }
 
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
+    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid block index.
     pub fn cell_max(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
+        crate::error::check_index(idx, self.block_count())?;
         Ok(self.storage.cell_max(idx))
-    }
-}
-
-impl<T: TensorValue> TensorDigest<T, QuantileSpine> {
-    pub fn sample_count(&self) -> u32 {
-        self.storage.sample_count()
-    }
-
-    pub fn config(&self) -> &crate::QuantileSpineConfig {
-        self.storage.config()
-    }
-
-    pub fn link(&mut self) -> crate::SpineLink {
-        self.storage.link()
-    }
-
-    pub fn min(&mut self) -> Vec<f32> {
-        self.storage.min()
-    }
-
-    pub fn max(&mut self) -> Vec<f32> {
-        self.storage.max()
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn cell_min(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.cell_min(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn cell_max(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.cell_max(idx))
-    }
-
-    pub fn recent_min(&mut self) -> Vec<f32> {
-        self.storage.recent_min()
-    }
-
-    pub fn recent_max(&mut self) -> Vec<f32> {
-        self.storage.recent_max()
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn zero_count(&mut self, idx: usize) -> Result<u32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.zero_count(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn secondary_atom(&mut self, idx: usize) -> Result<Option<(f32, u32)>> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.secondary_atom(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn surprise(&mut self, idx: usize) -> Result<f32> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.surprise(idx))
-    }
-
-    /// Fails with [`crate::Error::IndexOutOfBounds`] if `idx` is not a valid position.
-    pub fn regime(&mut self, idx: usize) -> Result<crate::SpineRegime> {
-        crate::error::check_index(idx, self.numel())?;
-        Ok(self.storage.regime(idx))
     }
 }

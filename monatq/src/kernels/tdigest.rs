@@ -1,10 +1,13 @@
 use rayon::prelude::*;
+use std::borrow::Cow;
+use std::mem;
 #[cfg(feature = "visualize")]
 use std::sync::atomic::AtomicBool;
 use wide::f32x8;
 
 use crate::{
     TensorValue,
+    block::BlockLayout,
     distribution::Distribution,
     kernels::{DigestKernel, TDigest, TDigestConfig, sealed},
     tensor_digest::StorageOperations,
@@ -14,20 +17,15 @@ use crate::{
 ///
 /// All centroid storage lives in contiguous arrays owned by this struct.
 /// Element `e` occupies `centroids_*[e * max_centroids .. e * max_centroids + n_centroids[e]]`.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(bound(
-    serialize = "T: serde::Serialize",
-    deserialize = "T: serde::de::DeserializeOwned"
-))]
 pub struct TDigestStorage<T: TensorValue> {
-    dtype_tag: u8,
-    shape: Vec<usize>,
-    numel: usize,
+    layout: BlockLayout,
     compression: usize,
 
-    // Row-major input buffer: sample s, element i → row_buffer[s * numel + i].
+    // Row-major input buffer: sample s, element i → row_buffer[s * input_numel + i].
     row_buffer: Vec<T>,
+    // New values per block before compression; `buffer_rows` is derived from it and the layout.
     buffer_capacity: usize,
+    buffer_rows: usize,
     n_buffered: usize,
 
     // Per-element centroid storage.
@@ -40,65 +38,105 @@ pub struct TDigestStorage<T: TensorValue> {
     maxs: Vec<T>,
 }
 
-impl<T: TensorValue> TDigestStorage<T> {
-    /// Create a new digest for tensors of the given `shape` (row-major).
-    ///
-    /// `compression` controls the T-Digest accuracy/memory trade-off: higher values
-    /// keep more centroids and give more accurate quantile estimates. A value of 100
-    /// is a reasonable default.
-    pub fn new(shape: &[usize], compression: usize) -> Self {
-        let numel = shape.iter().product::<usize>();
-        let buffer_capacity = compression * 2;
-        // Same as in t-digest-c by RedisBloom
-        let max_centroids = 6 * compression + 10;
+pub(crate) const TDIGEST_KERNEL_TAG: u8 = 0x54;
 
+/// Snapshot format revision. Bump whenever the field layout below changes.
+const TDIGEST_FORMAT_VERSION: u16 = 5;
+
+/// Persistent summary only. Borrow on save; deserialize into owned arrays on load.
+/// Ingestion workspace and capacities derived from compression are never serialized.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "T: serde::Serialize",
+    deserialize = "T: serde::de::DeserializeOwned"
+))]
+struct TDigestSnapshot<'a, T: TensorValue> {
+    kernel_tag: u8,
+    format_version: u16,
+    dtype_tag: u8,
+    layout: Cow<'a, BlockLayout>,
+    compression: usize,
+    centroids_means: Cow<'a, [f32]>,
+    centroids_weights: Cow<'a, [u32]>,
+    n_centroids: Cow<'a, [usize]>,
+    total_weights: Cow<'a, [u32]>,
+    mins: Cow<'a, [T]>,
+    maxs: Cow<'a, [T]>,
+}
+
+/// Leading fields shared by every TDigest snapshot.
+#[derive(serde::Deserialize)]
+struct TDigestHeader {
+    kernel_tag: u8,
+    format_version: u16,
+    dtype_tag: u8,
+}
+
+/// Identify the element type of an uncompressed TDigest payload without decoding its state.
+pub(crate) fn peek_dtype_tag(payload: &[u8]) -> Option<u8> {
+    let header: TDigestHeader = bincode2::deserialize(payload).ok()?;
+    (header.kernel_tag == TDIGEST_KERNEL_TAG).then_some(header.dtype_tag)
+}
+
+impl<T: TensorValue> TDigestStorage<T> {
+    /// Create a digest over `layout`.
+    ///
+    /// `compression` controls the T-Digest accuracy/memory trade-off: higher values keep
+    /// more centroids and give more accurate quantile estimates. `buffer_capacity` is the
+    /// number of new values each block collects before compression.
+    pub(crate) fn with_layout(
+        layout: BlockLayout,
+        compression: usize,
+        buffer_capacity: usize,
+    ) -> Self {
+        let max_centroids = 6 * compression + 10;
+        let state_count = layout.block_count();
+        let buffer_rows = layout.buffer_rows(buffer_capacity);
+        let row_len = layout
+            .input_numel()
+            .checked_mul(buffer_rows)
+            .expect("row buffer size overflow");
         Self {
-            dtype_tag: T::DTYPE_TAG,
-            shape: shape.to_vec(),
-            numel,
+            layout,
             compression,
-            row_buffer: vec![T::min_sentinel(); numel * buffer_capacity],
+            row_buffer: vec![T::min_sentinel(); row_len],
             buffer_capacity,
+            buffer_rows,
             n_buffered: 0,
             max_centroids,
-            centroids_means: vec![0.0f32; numel * max_centroids],
-            centroids_weights: vec![0u32; numel * max_centroids],
-            n_centroids: vec![0usize; numel],
-            total_weights: vec![0u32; numel],
-            mins: vec![T::min_sentinel(); numel],
-            maxs: vec![T::max_sentinel(); numel],
+            centroids_means: vec![0.0; state_count * max_centroids],
+            centroids_weights: vec![0; state_count * max_centroids],
+            n_centroids: vec![0; state_count],
+            total_weights: vec![0; state_count],
+            mins: vec![T::min_sentinel(); state_count],
+            maxs: vec![T::max_sentinel(); state_count],
         }
     }
 
-    /// Total number of elements (product of all shape dimensions).
-    pub fn numel(&self) -> usize {
-        self.numel
-    }
-
-    /// Shape of the tensors being tracked (as passed to `new`).
-    pub fn shape(&self) -> &[usize] {
-        &self.shape
-    }
-
-    /// Total weight (sample count) accumulated at element `idx`.
+    /// Total weight accumulated at atomic block `idx`.
     pub fn total_weight(&self, idx: usize) -> u32 {
         self.total_weights[idx]
     }
 
-    /// Add one tensor sample. `data` must be row-major with `len == numel()`.
+    /// Add one tensor sample. `data` must be row-major with `len == input_numel`.
     pub fn update(&mut self, data: &[T]) {
+        let input_numel = self.layout.input_numel();
         assert_eq!(
             data.len(),
-            self.numel,
-            "data length {} does not match numel {}",
+            input_numel,
+            "data length {} does not match input element count {}",
             data.len(),
-            self.numel
+            input_numel
         );
 
+        if self.buffer_rows == 0 {
+            self.process_data(data, 1);
+            return;
+        }
         let s = self.n_buffered;
-        self.row_buffer[s * self.numel..(s + 1) * self.numel].copy_from_slice(data);
+        self.row_buffer[s * input_numel..(s + 1) * input_numel].copy_from_slice(data);
         self.n_buffered += 1;
-        if self.n_buffered == self.buffer_capacity {
+        if self.n_buffered == self.buffer_rows {
             self.flush();
         }
     }
@@ -110,12 +148,22 @@ impl<T: TensorValue> TDigestStorage<T> {
         }
 
         let n = self.n_buffered;
-        let numel = self.numel;
+        let data_len = n * self.layout.input_numel();
+        // Move the allocation out temporarily so processing can borrow it while mutating
+        // the digest arrays, without cloning the full N1 input buffer.
+        let row_buffer = mem::take(&mut self.row_buffer);
+        self.process_data(&row_buffer[..data_len], n);
+        self.row_buffer = row_buffer;
+        self.n_buffered = 0;
+    }
+
+    fn process_data(&mut self, data: &[T], n: usize) {
+        let input_numel = self.layout.input_numel();
         let max_centroids = self.max_centroids;
         let compression = self.compression;
-        let row_buffer = &self.row_buffer;
+        let layout = &self.layout;
 
-        // Zip up the per-element mutable slices and process in parallel.
+        // Zip up the per-block mutable slices and process in parallel.
         let means_chunks = self.centroids_means.par_chunks_mut(max_centroids);
         let weights_chunks = self.centroids_weights.par_chunks_mut(max_centroids);
         let n_centroids = &mut self.n_centroids;
@@ -131,12 +179,15 @@ impl<T: TensorValue> TDigestStorage<T> {
             .zip(maxs.par_iter_mut())
             .enumerate()
             .for_each_init(
-                || Vec::with_capacity(n),
+                || Vec::with_capacity(n * layout.max_block_len()),
                 |new_values: &mut Vec<T>,
                  (e, (((((e_means, e_weights), e_nc), e_tw), e_min), e_max))| {
                     // Reuse one scratch vector per worker to avoid per-element allocation churn.
                     new_values.clear();
-                    new_values.extend((0..n).map(|s| row_buffer[s * numel + e]));
+                    let (start, stride, len) = layout.span(e);
+                    for row in data.chunks_exact(input_numel) {
+                        new_values.extend((0..len).map(|k| row[start + k * stride]));
+                    }
                     new_values.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
                     if let Some(&batch_min) = new_values.first() {
                         if batch_min < *e_min {
@@ -161,8 +212,6 @@ impl<T: TensorValue> TDigestStorage<T> {
                     );
                 },
             );
-
-        self.n_buffered = 0;
     }
 
     /// Compute a single quantile at every position. Returns a flat row-major `Vec<f32>`.
@@ -200,7 +249,7 @@ impl<T: TensorValue> TDigestStorage<T> {
             .collect()
     }
 
-    /// Query multiple quantiles for a single element by flat index.
+    /// Query multiple quantiles for one atomic block by flat block index.
     pub fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> Vec<f32> {
         self.flush();
         let start = idx * self.max_centroids;
@@ -219,7 +268,11 @@ impl<T: TensorValue> TDigestStorage<T> {
     pub fn merge_cells(&mut self, indices: &[usize]) -> Self {
         self.flush();
 
-        let mut merged = TDigestStorage::new(&[1], self.compression);
+        let mut merged = TDigestStorage::with_layout(
+            BlockLayout::default_for(&[1]),
+            self.compression,
+            self.buffer_capacity,
+        );
         if indices.is_empty() {
             return merged;
         }
@@ -286,7 +339,11 @@ impl<T: TensorValue> TDigestStorage<T> {
             update_max(&mut max, ch_digest.maxs[0]);
         }
 
-        let mut merged = TDigestStorage::new(&[1], self.compression);
+        let mut merged = TDigestStorage::with_layout(
+            BlockLayout::default_for(&[1]),
+            self.compression,
+            self.buffer_capacity,
+        );
         if all.is_empty() {
             return merged;
         }
@@ -308,11 +365,10 @@ impl<T: TensorValue> TDigestStorage<T> {
         merged
     }
 
-    /// Merge all channels of the tensor into one digest.
+    /// Merge every atomic block exactly once into one digest.
     pub fn merge_all(&mut self) -> Self {
         self.flush();
-        let n_channels = self.numel / self.spatial_size();
-        self.merge_channels(&(0..n_channels).collect::<Vec<_>>())
+        self.merge_cells(&(0..self.layout.block_count()).collect::<Vec<_>>())
     }
 
     /// Flush pending data and return a zstd-compressed bincode snapshot.
@@ -322,8 +378,20 @@ impl<T: TensorValue> TDigestStorage<T> {
         T: serde::Serialize,
     {
         self.flush();
-        let payload = bincode2::serialize(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let payload = bincode2::serialize(&TDigestSnapshot {
+            kernel_tag: TDIGEST_KERNEL_TAG,
+            format_version: TDIGEST_FORMAT_VERSION,
+            dtype_tag: T::DTYPE_TAG,
+            layout: Cow::Borrowed(&self.layout),
+            compression: self.compression,
+            centroids_means: Cow::Borrowed(&self.centroids_means),
+            centroids_weights: Cow::Borrowed(&self.centroids_weights),
+            n_centroids: Cow::Borrowed(&self.n_centroids),
+            total_weights: Cow::Borrowed(&self.total_weights),
+            mins: Cow::Borrowed(&self.mins),
+            maxs: Cow::Borrowed(&self.maxs),
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         zstd::encode_all(payload.as_slice(), 3).map_err(std::io::Error::other)
     }
 
@@ -341,29 +409,107 @@ impl<T: TensorValue> TDigestStorage<T> {
     where
         T: serde::de::DeserializeOwned,
     {
-        let loaded: Self = bincode2::deserialize(payload)
+        let header: TDigestHeader = bincode2::deserialize(payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if loaded.dtype_tag != T::DTYPE_TAG {
+        if header.kernel_tag != TDIGEST_KERNEL_TAG {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "not a TDigest snapshot: kernel tag {} but expected {TDIGEST_KERNEL_TAG}",
+                    header.kernel_tag
+                ),
+            ));
+        }
+        if header.format_version != TDIGEST_FORMAT_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported TDigest snapshot version {} but expected {TDIGEST_FORMAT_VERSION}",
+                    header.format_version
+                ),
+            ));
+        }
+        if header.dtype_tag != T::DTYPE_TAG {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "dtype mismatch: snapshot contains tag {} but expected {}",
-                    loaded.dtype_tag,
+                    header.dtype_tag,
                     T::DTYPE_TAG
                 ),
             ));
         }
-        Ok(loaded)
+        let loaded: TDigestSnapshot<T> = bincode2::deserialize(payload)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        loaded
+            .layout
+            .validate()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+        if loaded.compression == 0 {
+            return Err(invalid("snapshot compression must be greater than zero"));
+        }
+        let expected_buffer_capacity = loaded
+            .compression
+            .checked_mul(2)
+            .ok_or_else(|| invalid("snapshot compression overflows buffer capacity"))?;
+        let expected_max_centroids = loaded
+            .compression
+            .checked_mul(6)
+            .and_then(|value| value.checked_add(10))
+            .ok_or_else(|| invalid("snapshot compression overflows centroid capacity"))?;
+        let states = loaded.layout.block_count();
+        let centroid_slots = states
+            .checked_mul(expected_max_centroids)
+            .ok_or_else(|| invalid("snapshot centroid array length overflows usize"))?;
+        if loaded.n_centroids.len() != states
+            || loaded.total_weights.len() != states
+            || loaded.mins.len() != states
+            || loaded.maxs.len() != states
+            || loaded.centroids_means.len() != centroid_slots
+            || loaded.centroids_weights.len() != centroid_slots
+        {
+            return Err(invalid("snapshot arrays do not match block layout"));
+        }
+        if loaded
+            .n_centroids
+            .iter()
+            .any(|&count| count > expected_max_centroids)
+        {
+            return Err(invalid("snapshot centroid count exceeds capacity"));
+        }
+
+        let buffer_rows = loaded.layout.buffer_rows(expected_buffer_capacity);
+        let row_slots = loaded
+            .layout
+            .input_numel()
+            .checked_mul(buffer_rows)
+            .ok_or_else(|| invalid("snapshot row buffer length overflows usize"))?;
+        Ok(Self {
+            layout: loaded.layout.into_owned(),
+            compression: loaded.compression,
+            buffer_capacity: expected_buffer_capacity,
+            buffer_rows,
+            max_centroids: expected_max_centroids,
+            row_buffer: vec![T::min_sentinel(); row_slots],
+            n_buffered: 0,
+            centroids_means: loaded.centroids_means.into_owned(),
+            centroids_weights: loaded.centroids_weights.into_owned(),
+            n_centroids: loaded.n_centroids.into_owned(),
+            total_weights: loaded.total_weights.into_owned(),
+            mins: loaded.mins.into_owned(),
+            maxs: loaded.maxs.into_owned(),
+        })
     }
 
-    /// Number of spatial elements per channel (product of the last two shape dims, or `numel`
-    /// for tensors with fewer than two dimensions).
+    /// Number of atomic blocks per channel in compact block geometry.
     fn spatial_size(&self) -> usize {
-        let ndim = self.shape.len();
+        let shape = self.layout.shape();
+        let ndim = shape.len();
         if ndim < 2 {
-            self.numel
+            self.layout.block_count()
         } else {
-            self.shape[ndim - 2] * self.shape[ndim - 1]
+            shape[ndim - 2] * shape[ndim - 1]
         }
     }
 
@@ -391,18 +537,27 @@ impl<T: TensorValue> TDigestStorage<T> {
 }
 
 impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
-    fn numel(&self) -> usize {
-        self.numel()
-    }
     fn shape(&self) -> &[usize] {
-        self.shape()
+        self.layout.input_shape()
+    }
+    fn numel(&self) -> usize {
+        self.layout.input_numel()
+    }
+    fn block_shape(&self) -> &[usize] {
+        self.layout.shape()
+    }
+    fn block_count(&self) -> usize {
+        self.layout.block_count()
+    }
+    fn block_config(&self) -> crate::BlockConfig {
+        self.layout.config()
     }
     fn total_weight(&self, idx: usize) -> crate::Result<u32> {
-        crate::error::check_index(idx, self.numel())?;
+        crate::error::check_index(idx, self.layout.block_count())?;
         Ok(self.total_weight(idx))
     }
     fn update(&mut self, data: &[T]) -> crate::Result<()> {
-        crate::error::check_sample_len(data.len(), self.numel())?;
+        crate::error::check_sample_len(data.len(), self.layout.input_numel())?;
         self.update(data);
         Ok(())
     }
@@ -416,19 +571,27 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
         self.quantiles(qs)
     }
     fn cell_quantiles(&mut self, idx: usize, qs: &[f32]) -> crate::Result<Vec<f32>> {
-        crate::error::check_index(idx, self.numel())?;
+        crate::error::check_index(idx, self.layout.block_count())?;
         Ok(self.cell_quantiles(idx, qs))
     }
     fn merge_cells(&mut self, indices: &[usize]) -> crate::Result<Self> {
         for &idx in indices {
-            crate::error::check_index(idx, self.numel())?;
+            crate::error::check_index(idx, self.layout.block_count())?;
         }
         Ok(TDigestStorage::merge_cells(self, indices))
     }
     fn merge_channels(&mut self, channel_indices: &[usize]) -> crate::Result<Self> {
         let hw = self.spatial_size();
         for &channel in channel_indices {
-            crate::error::check_index(channel * hw + hw - 1, self.numel())?;
+            let end = channel
+                .checked_add(1)
+                .and_then(|value| value.checked_mul(hw))
+                .and_then(|value| value.checked_sub(1))
+                .ok_or(crate::Error::IndexOutOfBounds {
+                    index: usize::MAX,
+                    numel: self.layout.block_count(),
+                })?;
+            crate::error::check_index(end, self.layout.block_count())?;
         }
         Ok(TDigestStorage::merge_channels(self, channel_indices))
     }
@@ -480,7 +643,21 @@ impl<T: TensorValue> sealed::Kernel<T> for TDigest {
         shape: &[usize],
         config: <TDigest as DigestKernel<T>>::Config,
     ) -> Self::Storage {
-        TDigestStorage::new(shape, config.compression)
+        <Self as sealed::Kernel<T>>::create_storage_with_layout(
+            BlockLayout::default_for(shape),
+            config,
+        )
+    }
+
+    fn create_storage_with_layout(
+        layout: BlockLayout,
+        config: <TDigest as DigestKernel<T>>::Config,
+    ) -> Self::Storage {
+        TDigestStorage::with_layout(
+            layout,
+            config.compression,
+            config.effective_buffer_capacity(),
+        )
     }
 }
 
@@ -504,10 +681,14 @@ impl<T: TensorValue> TDigestStorage<T> {
     /// estimated density.
     pub fn without_zeros(&mut self) -> Self {
         self.flush();
-        let mut filtered = TDigestStorage::new(&self.shape, self.compression);
+        let mut filtered = TDigestStorage::with_layout(
+            self.layout.clone(),
+            self.compression,
+            self.buffer_capacity,
+        );
         let eps = 1e-12_f32;
 
-        for e in 0..self.numel {
+        for e in 0..self.layout.block_count() {
             let src_start = e * self.max_centroids;
             let dst_start = e * filtered.max_centroids;
             let nc = self.n_centroids[e];
@@ -828,9 +1009,164 @@ fn quantile_from_centroids(
 mod tests {
     use super::*;
 
+    fn digest(shape: &[usize], compression: usize) -> TDigestStorage<f32> {
+        TDigestStorage::with_layout(
+            BlockLayout::default_for(shape),
+            compression,
+            compression * 2,
+        )
+    }
+
+    #[test]
+    fn blocked_mode_never_allocates_or_uses_tensor_row_buffer() {
+        let layout =
+            BlockLayout::new(&[4, 1024], crate::BlockConfig::blocks_per_axis(4, 1)).unwrap();
+        let mut td = TDigestStorage::<f32>::with_layout(layout, 100, 200);
+        assert!(td.row_buffer.is_empty());
+        td.update(&vec![1.0; 4096]);
+        assert!(td.row_buffer.is_empty());
+        assert_eq!(td.n_buffered, 0);
+    }
+
+    #[test]
+    fn buffer_capacity_counts_values_per_block() {
+        let layout = BlockLayout::new(&[2, 8], crate::BlockConfig::block_size(4, 1)).unwrap();
+        let mut td = TDigestStorage::<f32>::with_layout(layout.clone(), 100, 8);
+        assert_eq!(td.buffer_rows, 2);
+        assert_eq!(td.row_buffer.len(), 32);
+        td.update(&[1.0; 16]);
+        assert_eq!(td.n_buffered, 1);
+        td.update(&[2.0; 16]);
+        assert_eq!(td.n_buffered, 0);
+        assert_eq!(td.total_weights, vec![8; 4]);
+
+        let mut direct = TDigestStorage::<f32>::with_layout(layout, 100, 0);
+        assert!(direct.row_buffer.is_empty());
+        direct.update(&[1.0; 16]);
+        assert_eq!(direct.total_weights, vec![4; 4]);
+    }
+
+    fn current_snapshot() -> TDigestSnapshot<'static, f32> {
+        let mut storage = digest(&[2], 10);
+        storage.update(&[1.0, 2.0]);
+        let bytes = storage.to_bytes().unwrap();
+        let payload = zstd::decode_all(bytes.as_slice()).unwrap();
+        bincode2::deserialize(&payload).unwrap()
+    }
+
+    fn assert_rejected(
+        tamper: impl FnOnce(&mut TDigestSnapshot<'static, f32>),
+        expected_fragment: &str,
+    ) {
+        let mut snapshot = current_snapshot();
+        tamper(&mut snapshot);
+        let payload = bincode2::serialize(&snapshot).unwrap();
+        let Err(error) = TDigestStorage::<f32>::from_payload(&payload) else {
+            panic!("tampered snapshot must be rejected");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(expected_fragment),
+            "error {error:?} does not mention {expected_fragment:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_wrong_version_and_invalid_metadata() {
+        assert_rejected(
+            |snapshot| snapshot.format_version += 1,
+            "unsupported TDigest snapshot version",
+        );
+        assert_rejected(
+            |snapshot| snapshot.kernel_tag ^= 0xff,
+            "not a TDigest snapshot",
+        );
+        assert_rejected(|snapshot| snapshot.dtype_tag = 1, "dtype mismatch");
+        assert_rejected(|snapshot| snapshot.compression = 0, "compression");
+        assert_rejected(
+            |snapshot| snapshot.compression = usize::MAX,
+            "buffer capacity",
+        );
+        assert_rejected(
+            |snapshot| snapshot.compression = usize::MAX / 6,
+            "centroid capacity",
+        );
+        assert_rejected(
+            |snapshot| snapshot.n_centroids.to_mut()[0] = snapshot.compression * 6 + 11,
+            "centroid count",
+        );
+        assert_rejected(
+            |snapshot| snapshot.compression = (usize::MAX - 10) / 6,
+            "centroid array length overflows",
+        );
+        for array in 0..6 {
+            assert_rejected(
+                |snapshot| match array {
+                    0 => {
+                        snapshot.centroids_means.to_mut().pop();
+                    }
+                    1 => {
+                        snapshot.centroids_weights.to_mut().pop();
+                    }
+                    2 => {
+                        snapshot.n_centroids.to_mut().pop();
+                    }
+                    3 => {
+                        snapshot.total_weights.to_mut().pop();
+                    }
+                    4 => {
+                        snapshot.mins.to_mut().pop();
+                    }
+                    _ => {
+                        snapshot.maxs.to_mut().pop();
+                    }
+                },
+                "arrays do not match block layout",
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_omits_stale_workspace_and_rebuilds_it_on_load() {
+        let mut storage = digest(&[2], 10);
+        for step in 0..27 {
+            storage.update(&[step as f32, -(step as f32)]);
+        }
+        let bytes = storage.to_bytes().unwrap();
+        assert_eq!(storage.n_buffered, 0);
+        assert!(storage.row_buffer.iter().any(|value| value.is_finite()));
+
+        // Saving the same summary must not depend on stale input values in the workspace.
+        storage.row_buffer.fill(f32::NAN);
+        assert_eq!(storage.to_bytes().unwrap(), bytes);
+        let mut restored = TDigestStorage::<f32>::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.buffer_capacity, 20);
+        assert_eq!(restored.max_centroids, 70);
+        assert_eq!(restored.n_buffered, 0);
+        assert_eq!(restored.row_buffer, vec![f32::INFINITY; 40]);
+        assert_eq!(
+            restored.quantiles(&[0.0, 0.5, 1.0]),
+            storage.quantiles(&[0.0, 0.5, 1.0])
+        );
+    }
+
+    #[test]
+    fn blocked_snapshot_load_rebuilds_row_workspace_from_block_length() {
+        let layout = BlockLayout::new(&[4], crate::BlockConfig::blocks_per_axis(2, 0)).unwrap();
+        let mut storage = TDigestStorage::<f32>::with_layout(layout, 10, 20);
+        storage.update(&[1.0, 2.0, 3.0, 4.0]);
+        let bytes = storage.to_bytes().unwrap();
+        let restored = TDigestStorage::<f32>::from_bytes(&bytes).unwrap();
+        // Two-element blocks need ten rows to collect the default 20 values per block.
+        assert_eq!(restored.buffer_rows, 10);
+        assert_eq!(restored.row_buffer.len(), 40);
+        assert_eq!(restored.n_buffered, 0);
+        assert_eq!(restored.layout, storage.layout);
+    }
+
     #[test]
     fn basic_quantile() {
-        let mut td = TDigestStorage::new(&[3], 100);
+        let mut td = digest(&[3], 100);
 
         for i in 0..1000usize {
             let x = i as f32;

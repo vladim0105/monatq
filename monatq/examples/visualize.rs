@@ -43,6 +43,7 @@ fn main() -> monatq::Result<()> {
         shape,
         monatq::TDigestConfig {
             compression: args.compression,
+            ..Default::default()
         },
     );
 

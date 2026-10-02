@@ -31,7 +31,7 @@ pub(crate) fn serve_until<T: TensorValue, S: StorageOperations<T>>(
     // Fail before binding the port if this kernel cannot analyse: reporting `Unsupported`
     // immediately is far better than serving a window that errors on every request.
     let distributions = digest.analyze()?;
-    let shape = digest.shape().to_vec();
+    let shape = digest.block_shape().to_vec();
 
     let listener = TcpListener::bind(&addr).map_err(crate::Error::Io)?;
     listener.set_nonblocking(true).map_err(crate::Error::Io)?;
@@ -422,9 +422,37 @@ mod tests {
         client.write_all(request.as_bytes()).unwrap();
         client.shutdown(Shutdown::Write).unwrap();
 
-        let mut digest = TDigestStorage::<f32>::new(shape, 100);
+        let mut digest = TDigestStorage::<f32>::with_layout(
+            crate::block::BlockLayout::default_for(shape),
+            100,
+            200,
+        );
         let distributions = vec![Distribution::Normal; shape.iter().product()];
         handle(&server, shape, &distributions, &mut digest);
+        drop(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    fn route_blocked(target: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let request =
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        client.write_all(request.as_bytes()).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+
+        let layout =
+            crate::block::BlockLayout::new(&[2, 5, 2], crate::BlockConfig::blocks_per_axis(2, 1))
+                .unwrap();
+        let mut digest = TDigestStorage::<f32>::with_layout(layout, 100, 200);
+        digest.update(&(0..20).map(|value| value as f32).collect::<Vec<_>>());
+        let shape = <TDigestStorage<f32> as StorageOperations<f32>>::block_shape(&digest).to_vec();
+        let distributions = digest.analyze();
+        handle(&server, &shape, &distributions, &mut digest);
         drop(server);
 
         let mut response = String::new();
@@ -437,6 +465,14 @@ mod tests {
             response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
             "unexpected response: {response}"
         );
+    }
+
+    #[test]
+    fn blocked_endpoints_serve_compact_geometry() {
+        let info = route_blocked("/api/info");
+        assert!(info.contains(r#"{"shape":[2,2,2],"ndim":3}"#));
+        let slice = route_blocked("/api/slice?c=1");
+        assert!(slice.contains(r#"{"rows":2,"cols":2,"distributions":["#));
     }
 
     #[test]

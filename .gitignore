@@ -4,3 +4,4 @@ Cargo.lock
 *.dylib
 *.so
 .vscode/
+.pi
