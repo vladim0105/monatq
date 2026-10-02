@@ -368,6 +368,7 @@ impl PyTensorDigest {
     /// than a silent no-op, because silently ignoring an accuracy knob is the kind of thing a
     /// caller only discovers from a bad result much later.
     #[new]
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (shape, *, kernel = "rankknot", compression = None, buffer_capacity = None, dtype = None, blocks = None, block_size = None, blocks_per_axis = None, block_axis = None))]
     fn new(
         shape: Vec<usize>,
