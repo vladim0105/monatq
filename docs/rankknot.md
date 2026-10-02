@@ -153,17 +153,19 @@ An empty state returns `0.0` for every probability. This check occurs before the
 
 ## Merging
 
-`merge_cells`, `merge_channels`, and `merge_all` treat each selected summary as positive weighted support:
+`merge_cells`, `merge_channels`, and `merge_all` treat each selected summary as positive weighted support. A selection of at most 64 blocks is compressed in a single pass:
 
-1. Emit every active knot with its count.
-2. Sort the union once.
+1. Emit every active knot with its population weight.
+2. Sort that support.
 3. Coalesce equal values.
 4. Run the same compression routine used during ingestion.
 5. Union the exact extrema.
 
+Wider selections are a 64-way tree of those passes. Each node compresses its children back to 32 knots before the parent reads them. One 32 KiB support buffer is reused for every node, which is 2,048 knot records. The longest path recompresses `ceil(log64(M))` times. `merge_all` addresses blocks by a contiguous range, so it does not allocate an index vector.
+
 Selected blocks are weighted by their individual observation counts, so blocks with different sizes contribute their proper population. A merged digest can continue accepting updates. Individual input elements cannot be separated back out of a pooled block.
 
-Merging is lossy because it recompresses approximate support. The initial measurements below are encouraging, but repeated merge-of-merge chains have not been characterized.
+Merging is lossy because it recompresses approximate support. A tree of merges repeats that loss along the path; extrema and population totals stay exact.
 
 ## Zero filtering
 
@@ -220,7 +222,7 @@ Approximate costs are:
 | Flush | `O(P × (B log B + B + K))`, parallel over positions | Worker-local `O(B + K)` scratch |
 | One tensor-wide quantile | `O(P × K)`, parallel over positions | Output vector |
 | Cell quantiles | `O(number of probabilities × K)` | Output vector |
-| Merge `M` positions | `O(MK log(MK))` | `O(MK)` temporary support |
+| Merge `M` positions | `O(MK log(FK))` | 32 KiB reusable support and `O(F log_F M)` partial summaries, `F = 64` |
 | Snapshot encode/decode | `O(PK)` | Encoded payload and decoded states; no intermediate flattened arrays |
 
 `K` is fixed in the current implementation, but it is shown explicitly to describe the algorithm rather than only its present constant factors.
@@ -270,7 +272,7 @@ RankKnot used about 94% less retained heap and 95% less peak heap than TDigest i
 
 ### Tensor-wide merging
 
-When all 32 positions were merged and compared with the exact pooled population, RankKnot had lower mean and maximum rank error than TDigest on all ten representative workloads.
+When all 32 positions were merged in one pass and compared with the exact pooled population, RankKnot had lower mean and maximum rank error than TDigest on all ten representative workloads. A 32-position merge still fits in one compression.
 
 Selected results:
 
@@ -281,7 +283,7 @@ Selected results:
 | 50% zeros | 0.000314 / 0.000877 | 0.033803 / 0.250106 |
 | Heterogeneous tensor | 0.001003 / 0.002752 | 0.007044 / 0.026593 |
 
-The merged RankKnot digest retained 360 bytes versus TDigest's 5,716 bytes. Merge peak allocation was 17,000 bytes versus approximately 37–38 KB.
+The merged RankKnot digest retained 360 bytes versus TDigest's 5,716 bytes. Merge peak allocation was 17,000 bytes versus approximately 37–38 KB on that single-pass run. The current merge reserves a 32 KiB support buffer for every non-empty selection.
 
 ### Throughput
 
@@ -299,7 +301,7 @@ These timings are platform-specific. RankKnot's small default buffer trades upda
 
 - There is no distribution-free accuracy bound for the fixed 32-knot state.
 - `backend_accuracy` stops at 100,000 samples per position; longer streams are not part of the checked-in report.
-- Repeated merge-of-merge chains are not characterized.
+- `merge_cells` recompresses `ceil(log64(M))` times. Chains of separate merge calls on top of that are not characterized beyond the rankknot merge suite.
 - Abrupt distribution shifts repeatedly approximate old state.
 - Separated modes can expose interpolation across unsupported value gaps.
 - Sparse activation behavior depends strongly on the exact zero fraction.
