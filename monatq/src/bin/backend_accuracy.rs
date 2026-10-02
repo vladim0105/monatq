@@ -940,7 +940,7 @@ fn mixed_stress_tensor(rows: usize, numel: usize) -> Vec<f32> {
     let lognormal = LogNormal::new(0.0, 1.0).unwrap();
     let atoms = (0..numel)
         .map(|position| {
-            (position % 4 == 2).then(|| equiprobable_atoms(rows, 33, 0xC0de_0000 ^ position as u32))
+            (position % 4 == 2).then(|| equiprobable_atoms(rows, 33, 0xc0de_0000 ^ position as u32))
         })
         .collect::<Vec<_>>();
     let mut states = (0..numel)
