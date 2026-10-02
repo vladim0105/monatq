@@ -2,6 +2,12 @@
 
 Notable changes to `monatq` are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **RankKnot can merge tensors of a million elements or more.** 0.4.0 reserved 32 knots × 16 bytes of scratch per selected block before sorting: **512 MB at 1 million elements, 5.12 GB at 10 million**. `merge_cells`, `merge_channels`, and `merge_all` now reuse one **32 KiB** buffer (15,625× less scratch at 1 million elements). More than 64 blocks go through a 64-way tree, four recompressions at 1 million elements. Extrema and population totals stay exact; quantiles on those wider merges can differ from 0.4.0.
+
 ## [0.4.0]
 
 ### Added

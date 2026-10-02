@@ -259,6 +259,8 @@ RankKnot had lower mean and maximum error than TDigest on nine of the ten repres
 
 The adversarial report uses 65,536 samples at one position and 1,003 probabilities. Its winners are mixed; no universal ordering is claimed.
 
+The stress report uses that same sample count and query grid on streams that are not in the sections above: a 32-level lattice and a 33-level lattice, ordered pure levels wider than the knot budget, a 99.9% zero tail, a negative sparse tail, Pareto and Cauchy draws, arcsine and center-peaked batches, wide and narrow unsupported gaps, four unequal atoms, a late location shift, alternating scale, a zero prefix followed by a ramp, an early needle prefix, adjacent `f32` codes, a twelve-decade log-uniform, integers past the 24-bit mantissa, and one 32-position tensor that mixes four of those margins. Winners there are mixed as well. The merged row for that tensor compares both kernels with the exact pooled population.
+
 ### Memory
 
 Heap figures come from an instrumented global allocator and exclude input data, exact truth, and query outputs. The following 32-position measurements were recorded on a local Apple M4 run with the default configuration:
