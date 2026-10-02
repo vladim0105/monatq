@@ -2,7 +2,7 @@
 
 Notable changes to `monatq` are documented in this file.
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 

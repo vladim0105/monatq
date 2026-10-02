@@ -1,6 +1,6 @@
 # RankKnot
 
-RankKnot is the default quantile kernel in `monatq` 0.3. It is a fixed-memory streaming summary for tracking an approximate empirical distribution independently at every tensor position.
+RankKnot is the default quantile kernel in `monatq` 0.4. It is a fixed-memory streaming summary for tracking an approximate empirical distribution independently at every tensor position.
 
 This document describes the current K32 Rust implementation. It is an implementation specification with initial measurements, not a claim of a universal error bound or a formal publication.
 
