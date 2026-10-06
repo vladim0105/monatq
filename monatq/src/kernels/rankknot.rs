@@ -12,6 +12,19 @@ use crate::{
 
 pub const RANK_KNOT_K: usize = 32;
 
+/// Knot records in the reusable merge buffer. Each record is 16 bytes, so this is 32 KiB.
+///
+/// One compression reads at most this many knots. [`MERGE_FANIN`] is how many summaries fit,
+/// since each summary contributes at most [`RANK_KNOT_K`] knots.
+const MERGE_ENTRY_BUDGET: usize = 32 * 1024 / 16;
+
+/// Summaries combined by one compression node.
+///
+/// Selections wider than this are split into this many chunks. Each chunk is compressed back
+/// to [`RANK_KNOT_K`] knots, then those summaries are compressed together. The longest path
+/// is `ceil(log_F(M))` compressions for `F = MERGE_FANIN`.
+const MERGE_FANIN: usize = MERGE_ENTRY_BUDGET / RANK_KNOT_K;
+
 /// Leading byte of a RankKnot snapshot payload.
 ///
 /// The crate-level [`crate::from_bytes`] loader uses this tag to identify the kernel.
@@ -104,6 +117,9 @@ struct Entry {
     weight: u64,
     pure: bool,
 }
+
+const _: () = assert!(std::mem::size_of::<Entry>() * MERGE_ENTRY_BUDGET == 32 * 1024);
+const _: () = assert!(MERGE_FANIN * RANK_KNOT_K == MERGE_ENTRY_BUDGET);
 
 struct RankKnotScratch {
     incoming: Vec<f32>,
@@ -264,73 +280,26 @@ impl<T: TensorValue> RankKnotStorage<T> {
 
     /// Merge selected flat-indexed blocks into a single-block digest.
     ///
-    /// Take each block's knot counts as population weights, sort the combined
-    /// support, coalesce equal values, and run the ingestion compressor. This preserves
-    /// relative population weights for unequal-sized blocks. Extrema are exact unions.
+    /// Selections of at most [`MERGE_FANIN`] blocks are compressed in one pass. Wider selections
+    /// are split into that many chunks, each chunk is compressed back to [`RANK_KNOT_K`] knots,
+    /// and those summaries are compressed together. Every compression takes knot counts as
+    /// population weights, sorts that support, coalesces equal values, and runs the ingestion
+    /// compressor. Relative population weights survive for unequal-sized blocks, and extrema
+    /// are exact unions.
+    ///
+    /// Scratch is one 32 KiB buffer, reused at every node. A selection of `M` blocks keeps one
+    /// fan-in of partial summaries per level and recompresses `ceil(log_F(M))` times along the
+    /// longest path, with `F = MERGE_FANIN`.
     pub(crate) fn merge_cells(&mut self, indices: &[usize]) -> Result<Self> {
         self.flush();
-        let mut merged = RankKnotStorage::with_config(&[1], self.config);
-        if indices.is_empty() {
-            return Ok(merged);
-        }
-
-        let mut entries = Vec::with_capacity(indices.len() * RANK_KNOT_K);
-        let mut min = f32::INFINITY;
-        let mut max = f32::NEG_INFINITY;
-        for &idx in indices {
-            check_index(idx, self.layout.block_count())?;
-            let state = &self.states[idx];
-            let observation_weight = self.state_weights[idx];
-            update_min(&mut min, state.min);
-            update_max(&mut max, state.max);
-            let count_total = count_total(state);
-            for index in 0..RANK_KNOT_K {
-                let count = state.counts[index];
-                if count == 0 {
-                    continue;
-                }
-                entries.push(Entry {
-                    value: state.values[index],
-                    weight: population_weight(count, observation_weight, count_total),
-                    pure: state.pure_mask & (1_u64 << index) != 0,
-                });
-            }
-            merged.state_weights[0] = merged.state_weights[0].saturating_add(observation_weight);
-        }
-
-        // A scalar merged digest receives one observation per represented source observation,
-        // so future scalar updates continue with the same old/new weighting.
-        merged.sample_count = merged.state_weights[0];
-        merged.states[0].min = min;
-        merged.states[0].max = max;
-        if entries.is_empty() {
-            return Ok(merged);
-        }
-
-        // Sort once, then coalesce equal values in place. `dedup_by` hands out the kept
-        // predecessor by mutable reference, so the union needs no second buffer.
-        entries.sort_unstable_by(|left, right| left.value.total_cmp(&right.value));
-        entries.dedup_by(|entry, kept| {
-            if kept.value == entry.value {
-                kept.weight = kept.weight.saturating_add(entry.weight);
-                kept.pure &= entry.pure;
-                true
-            } else {
-                false
-            }
-        });
-        let mut boundaries = [0_usize; RANK_KNOT_K - 1];
-        compress_and_store(&entries, &mut merged.states[0], &mut boundaries);
-        Ok(merged)
+        self.merge_n(indices.len(), &|offset| indices[offset])
     }
 
     /// Merge every position of the selected leading-dimension channels into one digest.
     ///
     /// A "channel" is a contiguous block of `H×W` flat positions; for a 4-D tensor
-    /// `[B, C, H, W]` the channel flat index is `b * C + c`. Unlike the t-digest kernel this
-    /// performs a single compression pass over the union rather than compressing per channel
-    /// first: knot weights are `u64` and moments accumulate in `f64`, so there is no
-    /// precision reason to pay a second lossy repartition.
+    /// `[B, C, H, W]` the channel flat index is `b * C + c`. The selected blocks go through
+    /// the same balanced compression as [`Self::merge_cells`].
     pub(crate) fn merge_channels(&mut self, channel_indices: &[usize]) -> Result<Self> {
         let hw = self.spatial_size();
         let mut cells = Vec::with_capacity(channel_indices.len() * hw);
@@ -356,7 +325,61 @@ impl<T: TensorValue> RankKnotStorage<T> {
 
     /// Merge every tensor position into one single-position digest.
     pub(crate) fn merge_all(&mut self) -> Result<Self> {
-        self.merge_cells(&(0..self.layout.block_count()).collect::<Vec<_>>())
+        self.flush();
+        let count = self.layout.block_count();
+        self.merge_n(count, &|offset| offset)
+    }
+
+    /// Balanced merge of `len` blocks addressed by `index_of`.
+    ///
+    /// `index_of` maps a dense offset in `0..len` to a flat block index. `merge_all` uses the
+    /// identity so it does not allocate an index vector; `merge_cells` passes the caller's
+    /// selection.
+    fn merge_n(&self, len: usize, index_of: &impl Fn(usize) -> usize) -> Result<Self> {
+        let mut merged = RankKnotStorage::with_config(&[1], self.config);
+        if len == 0 {
+            return Ok(merged);
+        }
+        let mut entries = Vec::with_capacity(MERGE_ENTRY_BUDGET);
+        let mut boundaries = [0_usize; RANK_KNOT_K - 1];
+        let (state, weight) = self.merge_range(0, len, index_of, &mut entries, &mut boundaries)?;
+        // A scalar merged digest receives one observation per represented source observation,
+        // so future scalar updates continue with the same old/new weighting.
+        merged.states[0] = state;
+        merged.state_weights[0] = weight;
+        merged.sample_count = weight;
+        Ok(merged)
+    }
+
+    fn merge_range(
+        &self,
+        base: usize,
+        len: usize,
+        index_of: &impl Fn(usize) -> usize,
+        entries: &mut Vec<Entry>,
+        boundaries: &mut [usize; RANK_KNOT_K - 1],
+    ) -> Result<(RankKnotState, u64)> {
+        let mut parts = [(RankKnotState::default(), 0_u64); MERGE_FANIN];
+        if len <= MERGE_FANIN {
+            for (offset, slot) in parts.iter_mut().enumerate().take(len) {
+                let index = index_of(base + offset);
+                check_index(index, self.layout.block_count())?;
+                *slot = (self.states[index], self.state_weights[index]);
+            }
+            return Ok(compress_support(&parts[..len], entries, boundaries));
+        }
+
+        // As-even chunks, with the extra blocks given to the earlier chunks. Every chunk is
+        // shorter than `len`, so the recursion terminates.
+        let mut cursor = 0;
+        for (slot, part) in parts.iter_mut().enumerate() {
+            let slots_left = MERGE_FANIN - slot;
+            let take = (len - cursor).div_ceil(slots_left);
+            *part = self.merge_range(base + cursor, take, index_of, entries, boundaries)?;
+            cursor += take;
+        }
+        debug_assert_eq!(cursor, len);
+        Ok(compress_support(&parts, entries, boundaries))
     }
 
     /// Return a copy with knots sitting at zero removed.
@@ -800,6 +823,63 @@ fn push_coalesced(entries: &mut Vec<Entry>, entry: Entry) {
     } else {
         entries.push(entry);
     }
+}
+
+/// Union `parts` into one summary.
+///
+/// `entries` and `boundaries` are caller-owned scratch reused by every node in the tree.
+/// Each part contributes its knots at population weight, so a partial that was halved to
+/// fit `u32` is scaled back up by its observation count before the next compression.
+fn compress_support(
+    parts: &[(RankKnotState, u64)],
+    entries: &mut Vec<Entry>,
+    boundaries: &mut [usize; RANK_KNOT_K - 1],
+) -> (RankKnotState, u64) {
+    entries.clear();
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    let mut weight = 0_u64;
+    for &(state, observation_weight) in parts {
+        update_min(&mut min, state.min);
+        update_max(&mut max, state.max);
+        weight = weight.saturating_add(observation_weight);
+        let total = count_total(&state);
+        for index in 0..RANK_KNOT_K {
+            let count = state.counts[index];
+            if count == 0 {
+                continue;
+            }
+            entries.push(Entry {
+                value: state.values[index],
+                weight: population_weight(count, observation_weight, total),
+                pure: state.pure_mask & (1_u64 << index) != 0,
+            });
+        }
+    }
+
+    let mut state = RankKnotState {
+        min,
+        max,
+        ..RankKnotState::default()
+    };
+    if entries.is_empty() {
+        return (state, weight);
+    }
+
+    // Sort once, then coalesce equal values in place. `dedup_by` hands out the kept
+    // predecessor by mutable reference, so the union needs no second buffer.
+    entries.sort_unstable_by(|left, right| left.value.total_cmp(&right.value));
+    entries.dedup_by(|entry, kept| {
+        if kept.value == entry.value {
+            kept.weight = kept.weight.saturating_add(entry.weight);
+            kept.pure &= entry.pure;
+            true
+        } else {
+            false
+        }
+    });
+    compress_and_store(entries, &mut state, boundaries);
+    (state, weight)
 }
 
 fn compress_and_store(
