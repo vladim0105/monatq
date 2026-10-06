@@ -17,9 +17,7 @@ fn to_py_err(error: monatq::Error) -> PyErr {
         monatq::Error::IndexOutOfBounds { .. } => PyIndexError::new_err(error.to_string()),
         monatq::Error::ShapeMismatch { .. }
         | monatq::Error::InvalidConfig { .. }
-        | monatq::Error::IncompatibleLayout { .. } => {
-            PyValueError::new_err(error.to_string())
-        }
+        | monatq::Error::IncompatibleLayout { .. } => PyValueError::new_err(error.to_string()),
         monatq::Error::InvalidSnapshot(_) => PyValueError::new_err(error.to_string()),
         // Display no longer repeats the underlying cause, so report the chain explicitly.
         monatq::Error::Io(ref inner) => PyIOError::new_err(format!("{error}: {inner}")),
@@ -196,6 +194,9 @@ impl Inner {
     }
     fn remap(&mut self, shape: &[usize], blocks: monatq::BlockConfig) -> monatq::Result<()> {
         dispatch!(self, d => d.remap(shape, blocks))
+    }
+    fn permute(&mut self, axes: &[isize]) -> monatq::Result<()> {
+        dispatch!(self, d => d.permute(axes))
     }
     fn dtype(&self) -> &'static str {
         match self {
@@ -529,6 +530,16 @@ impl PyTensorDigest {
             .map(|config| (*config).into_rust())
             .unwrap_or(monatq::BlockConfig::Elementwise);
         self.inner.remap(&shape, blocks).map_err(to_py_err)
+    }
+
+    /// Reorder the tensor axes like `numpy.transpose(axes)` or `torch.permute(*axes)`.
+    ///
+    /// Axis `i` of the new shape is axis `axes[i]` of the current one; negative axes are
+    /// allowed. Every element keeps its history, and a block grouping follows its axis, so
+    /// this never splits or merges blocks. Rows still waiting to be compressed are reordered
+    /// too. Invalid axes raise `ValueError` and leave the digest unchanged.
+    fn permute(&mut self, axes: Vec<isize>) -> PyResult<()> {
+        self.inner.permute(&axes).map_err(to_py_err)
     }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {

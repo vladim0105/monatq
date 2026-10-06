@@ -125,6 +125,19 @@ digest.reshape(&[6])?;
 digest.remap(&[3, 2], BlockConfig::Elementwise)?;
 ```
 
+`permute` reorders the axes, like numpy's `transpose(axes)` or torch's `permute(*dims)`:
+axis `i` of the new shape is axis `axes[i]` of the old one, and negative axes count from the
+end. Unlike `reshape`, it moves elements, so each element's summary and any still-buffered
+rows travel with it. A block grouping follows its axis, so a blocked digest is never
+rejected and `block_shape` is permuted the same way as the tensor shape. Axes that are not a
+permutation of every axis return `Error::InvalidConfig` and leave the digest unchanged.
+
+```rust
+let mut digest = TensorDigest::<f32>::new(&[2, 3]);
+digest.update(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])?;
+digest.permute(&[1, 0])?; // shape [3, 2]; the next update takes a [3, 2] tensor
+```
+
 The snapshot format now records the grouping mode. Snapshots written by monatq 0.3.0 or
 earlier must be regenerated; incompatible versions are rejected explicitly.
 

@@ -17,6 +17,7 @@ pub(crate) trait StorageOperations<T: TensorValue>: Sized {
     fn block_config(&self) -> BlockConfig;
     fn reshape(&mut self, shape: &[usize]) -> Result<()>;
     fn remap(&mut self, shape: &[usize], blocks: BlockConfig) -> Result<()>;
+    fn permute(&mut self, axes: &[isize]) -> Result<()>;
     fn total_weight(&self, idx: usize) -> Result<u32>;
     fn update(&mut self, data: &[T]) -> Result<()>;
     fn flush(&mut self);
@@ -177,6 +178,33 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     /// separately, is rejected with [`crate::Error::IncompatibleLayout`].
     pub fn remap(&mut self, shape: &[usize], blocks: BlockConfig) -> Result<()> {
         self.storage.remap(shape, blocks)
+    }
+
+    /// Reorder the tensor axes, like numpy's `transpose(axes)` or torch's `permute(*dims)`.
+    ///
+    /// Axis `i` of the new shape is axis `axes[i]` of the current one, so [`Self::update`]
+    /// afterwards takes tensors in the permuted layout. `axes` must name every axis exactly
+    /// once; negative axes count from the end. Unlike [`Self::reshape`], this moves elements,
+    /// so every element's history travels with it: the digest at new index `(j0, j1, ...)` is
+    /// the one that was at the old index whose coordinate along axis `axes[i]` is `ji`.
+    ///
+    /// A block grouping follows its axis, so blocked digests are never rejected: each block
+    /// keeps covering the same elements, and [`Self::block_shape`] is permuted the same way
+    /// as the tensor shape. Observations still waiting in the input buffer are reordered with
+    /// the elements they describe. Nothing is flushed or recompressed. Invalid `axes` fail
+    /// with [`crate::Error::InvalidConfig`] and leave the digest unchanged.
+    ///
+    /// ```
+    /// use monatq::TensorDigest;
+    ///
+    /// let mut digest = TensorDigest::<f32>::new(&[2, 3]);
+    /// digest.update(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    /// digest.permute(&[1, 0]).unwrap();
+    /// assert_eq!(digest.shape(), &[3, 2]);
+    /// assert_eq!(digest.quantile(1.0), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    /// ```
+    pub fn permute(&mut self, axes: &[isize]) -> Result<()> {
+        self.storage.permute(axes)
     }
 
     /// Total flushed observation weight for an atomic block.

@@ -270,19 +270,46 @@ impl BlockLayout {
     ) -> Result<LayoutChange> {
         let layout = Self::new(shape, config)?;
         let new_to_old = self.block_order(&layout, operation)?;
-        Ok(LayoutChange { layout, new_to_old })
+        Ok(LayoutChange {
+            layout,
+            new_to_old,
+            element_order: None,
+        })
     }
 
-    fn block_order(
-        &self,
-        target: &Self,
-        operation: &'static str,
-    ) -> Result<Option<Vec<usize>>> {
+    /// Layout after reordering the tensor axes, numpy `transpose` style: axis `i` of the
+    /// result is axis `axes[i]` of this layout. Negative axes count from the end.
+    ///
+    /// The grouping follows its axis, so every block keeps covering the same elements and
+    /// no summary is lost. The change carries both the block order and the element order, so
+    /// callers can move summaries and rows that are still waiting to be compressed.
+    pub(crate) fn permute(&self, axes: &[isize]) -> Result<LayoutChange> {
+        let axes = resolve_permutation(self.input_shape.len(), axes)?;
+        let shape: Vec<usize> = axes.iter().map(|&axis| self.input_shape[axis]).collect();
+        let moved_axis = axes.iter().position(|&axis| axis == self.axis).unwrap_or(0) as isize;
+        let config = match self.config() {
+            BlockConfig::Elementwise => BlockConfig::Elementwise,
+            BlockConfig::Size { size, .. } => BlockConfig::Size {
+                size,
+                axis: moved_axis,
+            },
+            BlockConfig::Count { count, .. } => BlockConfig::Count {
+                count,
+                axis: moved_axis,
+            },
+        };
+        let layout = Self::new(&shape, config)?;
+        debug_assert!(layout.block_count == self.block_count);
+        Ok(LayoutChange {
+            new_to_old: permuted_indices(&self.shape, &axes),
+            element_order: permuted_indices(&self.input_shape, &axes),
+            layout,
+        })
+    }
+
+    fn block_order(&self, target: &Self, operation: &'static str) -> Result<Option<Vec<usize>>> {
         if self.input_numel != target.input_numel {
-            return Err(incompatible(
-                operation,
-                "element count must be unchanged",
-            ));
+            return Err(incompatible(operation, "element count must be unchanged"));
         }
         // Elementwise (and any other one-element grouping) is a pure shape change: block i
         // is flat element i on both sides, so summaries and the row buffer already agree.
@@ -344,7 +371,7 @@ impl BlockLayout {
             new_to_old[new_block] = old_block;
             identity &= new_block == old_block;
         }
-        if new_to_old.iter().any(|&old| old == usize::MAX) {
+        if new_to_old.contains(&usize::MAX) {
             return Err(incompatible(operation, "it would split a pooled block"));
         }
         Ok((!identity).then_some(new_to_old))
@@ -385,6 +412,83 @@ pub(crate) struct LayoutChange {
     pub layout: BlockLayout,
     /// `new_to_old[new_block] = old_block`. `None` means the compact order is unchanged.
     pub new_to_old: Option<Vec<usize>>,
+    /// `element_order[new_flat] = old_flat` for input positions. `None` means rows that are
+    /// still buffered already match the new shape. Only an axis permutation moves elements.
+    pub element_order: Option<Vec<usize>>,
+}
+
+/// Normalize `axes` into a permutation of `0..ndim`.
+fn resolve_permutation(ndim: usize, axes: &[isize]) -> Result<Vec<usize>> {
+    let invalid = |message| Error::InvalidConfig {
+        parameter: "axes",
+        message,
+    };
+    if axes.len() != ndim {
+        return Err(invalid("must name every tensor axis exactly once"));
+    }
+    let mut seen = vec![false; ndim];
+    let mut resolved = Vec::with_capacity(ndim);
+    for &axis in axes {
+        let axis = if axis < 0 {
+            ndim.checked_sub(axis.unsigned_abs())
+        } else {
+            Some(axis as usize)
+        }
+        .filter(|&axis| axis < ndim)
+        .ok_or_else(|| invalid("must name existing tensor axes"))?;
+        if std::mem::replace(&mut seen[axis], true) {
+            return Err(invalid("must not repeat an axis"));
+        }
+        resolved.push(axis);
+    }
+    Ok(resolved)
+}
+
+/// For a row-major tensor of `shape` transposed by `axes`, the old flat index behind each new
+/// flat index. `None` when nothing moves (identity, scalar, or no elements).
+fn permuted_indices(shape: &[usize], axes: &[usize]) -> Option<Vec<usize>> {
+    let ndim = axes.len();
+    let total: usize = shape.iter().product();
+    if ndim == 0 || total == 0 {
+        return None;
+    }
+    let mut old_strides = vec![1usize; ndim];
+    for dim in (0..ndim - 1).rev() {
+        old_strides[dim] = old_strides[dim + 1] * shape[dim + 1];
+    }
+    let new_shape: Vec<usize> = axes.iter().map(|&axis| shape[axis]).collect();
+    let strides: Vec<usize> = axes.iter().map(|&axis| old_strides[axis]).collect();
+
+    let mut order = Vec::with_capacity(total);
+    let mut index = vec![0usize; ndim];
+    let mut offset = 0usize;
+    for _ in 0..total {
+        order.push(offset);
+        for dim in (0..ndim).rev() {
+            index[dim] += 1;
+            offset += strides[dim];
+            if index[dim] < new_shape[dim] {
+                break;
+            }
+            offset -= strides[dim] * new_shape[dim];
+            index[dim] = 0;
+        }
+    }
+    order
+        .iter()
+        .enumerate()
+        .any(|(new, &old)| new != old)
+        .then_some(order)
+}
+
+/// Reorder the first `rows` buffered rows in place so `row[new] = old_row[order[new]]`.
+pub(crate) fn permute_rows<T: Copy>(buffer: &mut [T], rows: usize, order: &[usize]) {
+    let mut scratch = Vec::with_capacity(order.len());
+    for row in buffer.chunks_exact_mut(order.len()).take(rows) {
+        scratch.clear();
+        scratch.extend(order.iter().map(|&old| row[old]));
+        row.copy_from_slice(&scratch);
+    }
 }
 
 fn incompatible(operation: &'static str, reason: &'static str) -> Error {
@@ -602,7 +706,8 @@ mod tests {
         assert_partition(&layout);
         let balanced = BlockLayout::new(&[1, 5], BlockConfig::blocks_per_axis(2, 1)).unwrap();
         assert_partition(&balanced);
-        let huge = BlockLayout::new(&[usize::MAX], BlockConfig::block_size(usize::MAX - 1, 0)).unwrap();
+        let huge =
+            BlockLayout::new(&[usize::MAX], BlockConfig::block_size(usize::MAX - 1, 0)).unwrap();
         assert_eq!(huge.block_index(0), 0);
         assert_eq!(huge.block_index(usize::MAX - 1), 1);
     }

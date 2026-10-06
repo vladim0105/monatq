@@ -543,6 +543,9 @@ impl<T: TensorValue> RankKnotStorage<T> {
             self.states = states;
             self.state_weights = weights;
         }
+        if let Some(order) = &change.element_order {
+            crate::block::permute_rows(&mut self.row_buffer, self.n_buffered, order);
+        }
         debug_assert_eq!(
             change.layout.buffer_rows(self.config.buffer_capacity),
             self.buffer_rows
@@ -651,6 +654,12 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
 
     fn remap(&mut self, shape: &[usize], blocks: crate::BlockConfig) -> Result<()> {
         let change = self.layout.retarget(shape, blocks, "remap")?;
+        self.apply_layout(change);
+        Ok(())
+    }
+
+    fn permute(&mut self, axes: &[isize]) -> Result<()> {
+        let change = self.layout.permute(axes)?;
         self.apply_layout(change);
         Ok(())
     }
@@ -1343,10 +1352,8 @@ mod tests {
 
     #[test]
     fn reshape_keeps_pending_rows_until_a_later_flush() {
-        let mut storage = RankKnotStorage::<f32>::with_config(
-            &[2, 3],
-            RankKnotConfig { buffer_capacity: 8 },
-        );
+        let mut storage =
+            RankKnotStorage::<f32>::with_config(&[2, 3], RankKnotConfig { buffer_capacity: 8 });
         let sample = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         storage.update(&sample).unwrap();
         assert_eq!(storage.n_buffered, 1);
@@ -1385,10 +1392,8 @@ mod tests {
 
     #[test]
     fn apply_layout_permutes_summaries_without_moving_pending_rows() {
-        let mut storage = RankKnotStorage::<f32>::with_config(
-            &[4],
-            RankKnotConfig { buffer_capacity: 4 },
-        );
+        let mut storage =
+            RankKnotStorage::<f32>::with_config(&[4], RankKnotConfig { buffer_capacity: 4 });
         storage.update(&[1.0, 2.0, 3.0, 4.0]).unwrap();
         let pending = storage.row_buffer.clone();
         let buffered = storage.n_buffered;
@@ -1402,16 +1407,25 @@ mod tests {
         storage.apply_layout(crate::block::LayoutChange {
             layout: BlockLayout::default_for(&[2, 2]),
             new_to_old: Some(vec![3, 1, 2, 0]),
+            element_order: None,
         });
         assert_eq!(storage.n_buffered, buffered);
         assert_eq!(storage.row_buffer, pending);
         assert_eq!(storage.state_weights, vec![4, 2, 3, 1]);
         assert_eq!(
-            storage.states.iter().map(|state| state.min).collect::<Vec<_>>(),
+            storage
+                .states
+                .iter()
+                .map(|state| state.min)
+                .collect::<Vec<_>>(),
             vec![3.0, 1.0, 2.0, 0.0]
         );
         assert_eq!(
-            storage.states.iter().map(|state| state.max).collect::<Vec<_>>(),
+            storage
+                .states
+                .iter()
+                .map(|state| state.max)
+                .collect::<Vec<_>>(),
             vec![13.0, 11.0, 12.0, 10.0]
         );
         assert_eq!(storage.layout.input_shape(), &[2, 2]);

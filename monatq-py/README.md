@@ -133,6 +133,19 @@ digest.remap([3, 2])
 digest.remap([16], BlockConfig(block_size=4, axis=0))
 ```
 
+`permute(axes)` reorders the axes like `numpy.transpose(axes)` or `torch.permute(*axes)`:
+axis `i` of the new shape is axis `axes[i]` of the old one, and negative axes are allowed.
+It moves elements, so every summary and any rows still waiting to be compressed travel with
+their element. A block grouping follows its axis, so `permute` never splits or merges
+blocks. `axes` must name every axis exactly once, otherwise `ValueError` is raised and the
+digest is unchanged.
+
+```python
+digest = TensorDigest([2, 3, 4])
+digest.permute([2, 0, 1])
+digest.shape  # [4, 2, 3]
+```
+
 ### Snapshots
 
 ```python

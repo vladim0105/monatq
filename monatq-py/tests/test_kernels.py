@@ -328,3 +328,43 @@ class TestReshape:
             separate.remap([8], BlockConfig(block_size=4))
         assert separate.shape == [8]
         assert separate.block_count == 8
+
+
+class TestPermute:
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    def test_permute_moves_elements_like_numpy_transpose(self, kernel):
+        digest = TensorDigest([2, 3, 4], kernel=kernel, buffer_capacity=8)
+        sample = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        digest.update(sample)
+        digest.permute([2, 0, 1])
+        assert digest.shape == [4, 2, 3]
+        expected = sample.transpose(2, 0, 1).reshape(-1)
+        assert digest.quantile(0.0) == pytest.approx(list(expected))
+        assert digest.quantile(1.0) == pytest.approx(list(expected))
+
+        digest.update(sample.transpose(2, 0, 1) + 100)
+        digest.permute([-2, -1, 0])
+        assert digest.shape == [2, 3, 4]
+        assert digest.quantile(0.0) == pytest.approx(list(sample.reshape(-1)))
+        assert digest.quantile(1.0) == pytest.approx(list((sample + 100).reshape(-1)))
+
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    def test_permute_keeps_blocks_with_their_axis_and_rejects_bad_axes(self, kernel):
+        digest = TensorDigest(
+            [2, 8],
+            kernel=kernel,
+            buffer_capacity=8,
+            blocks=BlockConfig(block_size=4),
+        )
+        digest.update(np.arange(16, dtype=np.float32))
+        digest.permute([1, 0])
+        assert digest.shape == [8, 2]
+        assert digest.block_shape == [2, 2]
+        assert digest.block_config == BlockConfig(block_size=4, axis=0)
+        assert digest.quantile(1.0) == pytest.approx([3.0, 11.0, 7.0, 15.0])
+
+        for axes in ([0], [0, 0], [0, 2], [-3, 0]):
+            with pytest.raises(ValueError, match="axes"):
+                digest.permute(axes)
+        assert digest.shape == [8, 2]
+        assert digest.quantile(1.0) == pytest.approx([3.0, 11.0, 7.0, 15.0])

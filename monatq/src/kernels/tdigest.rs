@@ -564,6 +564,11 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
         self.apply_layout(change);
         Ok(())
     }
+    fn permute(&mut self, axes: &[isize]) -> crate::Result<()> {
+        let change = self.layout.permute(axes)?;
+        self.apply_layout(change);
+        Ok(())
+    }
     fn total_weight(&self, idx: usize) -> crate::Result<u32> {
         crate::error::check_index(idx, self.layout.block_count())?;
         Ok(self.total_weight(idx))
@@ -764,6 +769,9 @@ impl<T: TensorValue> TDigestStorage<T> {
             self.total_weights = total_weights;
             self.mins = mins;
             self.maxs = maxs;
+        }
+        if let Some(order) = &change.element_order {
+            crate::block::permute_rows(&mut self.row_buffer, self.n_buffered, order);
         }
         debug_assert_eq!(
             change.layout.buffer_rows(self.buffer_capacity),
@@ -1245,11 +1253,8 @@ mod tests {
 
     #[test]
     fn reshape_keeps_pending_rows_until_a_later_flush() {
-        let mut storage = TDigestStorage::<f32>::with_layout(
-            BlockLayout::default_for(&[2, 3]),
-            20,
-            8,
-        );
+        let mut storage =
+            TDigestStorage::<f32>::with_layout(BlockLayout::default_for(&[2, 3]), 20, 8);
         let sample = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         storage.update(&sample);
         assert_eq!(storage.n_buffered, 1);
@@ -1289,8 +1294,7 @@ mod tests {
 
     #[test]
     fn apply_layout_permutes_centroid_chunks_without_moving_pending_rows() {
-        let mut storage =
-            TDigestStorage::<f32>::with_layout(BlockLayout::default_for(&[4]), 10, 4);
+        let mut storage = TDigestStorage::<f32>::with_layout(BlockLayout::default_for(&[4]), 10, 4);
         storage.update(&[1.0, 2.0, 3.0, 4.0]);
         let pending = storage.row_buffer.clone();
         let buffered = storage.n_buffered;
@@ -1308,6 +1312,7 @@ mod tests {
         storage.apply_layout(crate::block::LayoutChange {
             layout: BlockLayout::default_for(&[2, 2]),
             new_to_old: Some(vec![3, 1, 2, 0]),
+            element_order: None,
         });
         assert_eq!(storage.n_buffered, buffered);
         assert_eq!(storage.row_buffer, pending);
