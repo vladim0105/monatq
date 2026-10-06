@@ -37,6 +37,16 @@ pub enum Error {
         message: &'static str,
     },
 
+    /// Reshape or remap cannot move this digest onto the requested layout.
+    ///
+    /// Pooled observations cannot be separated again, and blocks that are still
+    /// tracked separately are not combined, because either change would discard state.
+    #[error("cannot {operation} this digest: {reason}")]
+    IncompatibleLayout {
+        operation: &'static str,
+        reason: &'static str,
+    },
+
     /// The bytes offered to a loader are not a valid snapshot.
     ///
     /// Covers a foreign or corrupt payload, an encoding the running build cannot decode, and
@@ -73,6 +83,11 @@ impl Error {
     /// True when the offered bytes were readable but are not a usable snapshot.
     pub fn is_invalid_snapshot(&self) -> bool {
         matches!(self, Self::InvalidSnapshot(_))
+    }
+
+    /// True when reshape or remap refused the layout because it would split or merge blocks.
+    pub fn is_incompatible_layout(&self) -> bool {
+        matches!(self, Self::IncompatibleLayout { .. })
     }
 
     /// Classify an I/O error raised while decoding snapshot bytes.

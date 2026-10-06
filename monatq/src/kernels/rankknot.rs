@@ -533,6 +533,22 @@ impl<T: TensorValue> RankKnotStorage<T> {
         storage.states = snapshot.states;
         Ok(storage)
     }
+
+    /// Move summaries when the compact block order changes. Pending rows stay put: they
+    /// are stored in flat element order, and a legal retarget keeps each block's elements.
+    fn apply_layout(&mut self, change: crate::block::LayoutChange) {
+        if let Some(order) = &change.new_to_old {
+            let states = order.iter().map(|&old| self.states[old]).collect();
+            let weights = order.iter().map(|&old| self.state_weights[old]).collect();
+            self.states = states;
+            self.state_weights = weights;
+        }
+        debug_assert_eq!(
+            change.layout.buffer_rows(self.config.buffer_capacity),
+            self.buffer_rows
+        );
+        self.layout = change.layout;
+    }
 }
 
 /// Reject a decoded state that violates an invariant the query path assumes.
@@ -623,6 +639,20 @@ impl<T: TensorValue> StorageOperations<T> for RankKnotStorage<T> {
     }
     fn block_config(&self) -> crate::BlockConfig {
         self.layout.config()
+    }
+
+    fn reshape(&mut self, shape: &[usize]) -> Result<()> {
+        let change = self
+            .layout
+            .retarget(shape, self.layout.config(), "reshape")?;
+        self.apply_layout(change);
+        Ok(())
+    }
+
+    fn remap(&mut self, shape: &[usize], blocks: crate::BlockConfig) -> Result<()> {
+        let change = self.layout.retarget(shape, blocks, "remap")?;
+        self.apply_layout(change);
+        Ok(())
     }
 
     fn total_weight(&self, idx: usize) -> Result<u32> {
@@ -1309,6 +1339,82 @@ mod tests {
         }
         assert_eq!(state.min, -330.0);
         assert_eq!(state.max, f32::INFINITY);
+    }
+
+    #[test]
+    fn reshape_keeps_pending_rows_until_a_later_flush() {
+        let mut storage = RankKnotStorage::<f32>::with_config(
+            &[2, 3],
+            RankKnotConfig { buffer_capacity: 8 },
+        );
+        let sample = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        storage.update(&sample).unwrap();
+        assert_eq!(storage.n_buffered, 1);
+        assert!(storage.state_weights.iter().all(|&weight| weight == 0));
+        let pending = storage.row_buffer.clone();
+
+        StorageOperations::reshape(&mut storage, &[3, 2]).unwrap();
+        assert_eq!(storage.layout.input_shape(), &[3, 2]);
+        assert_eq!(storage.n_buffered, 1);
+        assert_eq!(storage.row_buffer, pending);
+        assert!(storage.state_weights.iter().all(|&weight| weight == 0));
+
+        let mut blocked = RankKnotStorage::<f32>::with_layout(
+            BlockLayout::new(&[2, 8], crate::BlockConfig::block_size(4, -1)).unwrap(),
+            RankKnotConfig { buffer_capacity: 8 },
+        );
+        let pooled: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        blocked.update(&pooled).unwrap();
+        assert_eq!(blocked.n_buffered, 1);
+        let pooled_pending = blocked.row_buffer.clone();
+        let weights = blocked.state_weights.clone();
+        StorageOperations::reshape(&mut blocked, &[4, 4]).unwrap();
+        assert_eq!(blocked.layout.input_shape(), &[4, 4]);
+        assert_eq!(blocked.layout.shape(), &[4, 1]);
+        assert_eq!(blocked.n_buffered, 1);
+        assert_eq!(blocked.row_buffer, pooled_pending);
+        assert_eq!(blocked.state_weights, weights);
+
+        let error = StorageOperations::reshape(&mut blocked, &[8, 2]).unwrap_err();
+        assert!(error.is_incompatible_layout());
+        assert_eq!(blocked.layout.input_shape(), &[4, 4]);
+        assert_eq!(blocked.n_buffered, 1);
+        assert_eq!(blocked.row_buffer, pooled_pending);
+        assert_eq!(blocked.state_weights, weights);
+    }
+
+    #[test]
+    fn apply_layout_permutes_summaries_without_moving_pending_rows() {
+        let mut storage = RankKnotStorage::<f32>::with_config(
+            &[4],
+            RankKnotConfig { buffer_capacity: 4 },
+        );
+        storage.update(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let pending = storage.row_buffer.clone();
+        let buffered = storage.n_buffered;
+        for block in 0..4 {
+            storage.state_weights[block] = block as u64 + 1;
+            storage.states[block].min = block as f32;
+            storage.states[block].max = block as f32 + 10.0;
+        }
+        // Current one-axis layouts keep identity order. This installs a swapped order directly
+        // so a future retarget that does permute still leaves the flat row buffer alone.
+        storage.apply_layout(crate::block::LayoutChange {
+            layout: BlockLayout::default_for(&[2, 2]),
+            new_to_old: Some(vec![3, 1, 2, 0]),
+        });
+        assert_eq!(storage.n_buffered, buffered);
+        assert_eq!(storage.row_buffer, pending);
+        assert_eq!(storage.state_weights, vec![4, 2, 3, 1]);
+        assert_eq!(
+            storage.states.iter().map(|state| state.min).collect::<Vec<_>>(),
+            vec![3.0, 1.0, 2.0, 0.0]
+        );
+        assert_eq!(
+            storage.states.iter().map(|state| state.max).collect::<Vec<_>>(),
+            vec![13.0, 11.0, 12.0, 10.0]
+        );
+        assert_eq!(storage.layout.input_shape(), &[2, 2]);
     }
 
     #[test]

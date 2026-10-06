@@ -120,6 +120,19 @@ When blocks pool multiple elements, updates do not retain full tensor sample buf
 Elementwise layouts retain normal buffering. Snapshots preserve the block mode and its
 settings for both kernels.
 
+`reshape(shape)` changes the tensor shape `update` accepts and keeps the current grouping.
+`remap(shape, blocks=None)` changes the grouping as well; omit `blocks` for elementwise
+tracking. Both keep each block's summary and any rows still waiting to be compressed. The
+element count must stay the same, and a blocked digest moves only when every pooled block
+still covers the same elements. A split, a merge, or a missing grouping axis raises
+`ValueError` and leaves the digest unchanged.
+
+```python
+digest.reshape([6])
+digest.remap([3, 2])
+digest.remap([16], BlockConfig(block_size=4, axis=0))
+```
+
 ### Snapshots
 
 ```python

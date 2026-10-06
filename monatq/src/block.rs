@@ -256,6 +256,139 @@ impl BlockLayout {
     pub(crate) fn shape(&self) -> &[usize] {
         &self.shape
     }
+
+    /// Layout that reinterprets this digest as `shape` grouped by `config`.
+    ///
+    /// `new_to_old` is `None` when every block keeps its compact index. A `Some` map sends
+    /// each new block index to the old block that covers the same elements, so callers can
+    /// move summaries without touching the flat element buffer.
+    pub(crate) fn retarget(
+        &self,
+        shape: &[usize],
+        config: BlockConfig,
+        operation: &'static str,
+    ) -> Result<LayoutChange> {
+        let layout = Self::new(shape, config)?;
+        let new_to_old = self.block_order(&layout, operation)?;
+        Ok(LayoutChange { layout, new_to_old })
+    }
+
+    fn block_order(
+        &self,
+        target: &Self,
+        operation: &'static str,
+    ) -> Result<Option<Vec<usize>>> {
+        if self.input_numel != target.input_numel {
+            return Err(incompatible(
+                operation,
+                "element count must be unchanged",
+            ));
+        }
+        // Elementwise (and any other one-element grouping) is a pure shape change: block i
+        // is flat element i on both sides, so summaries and the row buffer already agree.
+        if self.each_element_is_a_block() && target.each_element_is_a_block() {
+            return Ok(None);
+        }
+        if self.block_count == target.block_count && self.spans_equal(target) {
+            return Ok(None);
+        }
+        if target.block_count > self.block_count {
+            return Err(incompatible(operation, "it would split a pooled block"));
+        }
+        if target.block_count < self.block_count {
+            return Err(incompatible(operation, "it would merge distinct blocks"));
+        }
+        self.permuted_order(target, operation)
+    }
+
+    fn each_element_is_a_block(&self) -> bool {
+        self.block_count == self.input_numel && self.singleton_blocks()
+    }
+
+    fn singleton_blocks(&self) -> bool {
+        match self.grouping {
+            Grouping::Elementwise => true,
+            Grouping::Size(size) => size == 1 || self.axis_len <= 1,
+            Grouping::Count(_) => self.larger_blocks == 0 && self.base_block_len <= 1,
+        }
+    }
+
+    fn spans_equal(&self, target: &Self) -> bool {
+        (0..self.block_count).all(|block| self.span(block) == target.span(block))
+    }
+
+    /// Equal-sized partitions whose compact order may differ.
+    fn permuted_order(&self, target: &Self, operation: &'static str) -> Result<Option<Vec<usize>>> {
+        let mut new_to_old = vec![usize::MAX; target.block_count];
+        let mut identity = true;
+        for old_block in 0..self.block_count {
+            let (start, stride, len) = self.span(old_block);
+            let new_block = target.block_index(start);
+            for step in 1..len {
+                if target.block_index(start + step * stride) != new_block {
+                    return Err(incompatible(operation, "it would split a pooled block"));
+                }
+            }
+            let new_span = target.span(new_block);
+            if new_span != (start, stride, len) {
+                let reason = if new_span.2 > len {
+                    "it would merge distinct blocks"
+                } else {
+                    "it would split a pooled block"
+                };
+                return Err(incompatible(operation, reason));
+            }
+            if new_to_old[new_block] != usize::MAX {
+                return Err(incompatible(operation, "it would merge distinct blocks"));
+            }
+            new_to_old[new_block] = old_block;
+            identity &= new_block == old_block;
+        }
+        if new_to_old.iter().any(|&old| old == usize::MAX) {
+            return Err(incompatible(operation, "it would split a pooled block"));
+        }
+        Ok((!identity).then_some(new_to_old))
+    }
+
+    /// Compact block index that owns flat input position `flat`.
+    fn block_index(&self, flat: usize) -> usize {
+        debug_assert!(self.inner > 0 && self.axis_len > 0);
+        let inner_pos = flat % self.inner;
+        let along = flat / self.inner;
+        let axis_pos = along % self.axis_len;
+        let outer = along / self.axis_len;
+        let block_axis = self.axis_block(axis_pos);
+        (outer * self.blocks_axis + block_axis) * self.inner + inner_pos
+    }
+
+    fn axis_block(&self, axis_pos: usize) -> usize {
+        match self.grouping {
+            Grouping::Size(size) => axis_pos / size,
+            Grouping::Count(_) | Grouping::Elementwise => {
+                let large = self.base_block_len + 1;
+                let head = self.larger_blocks * large;
+                if self.larger_blocks > 0 && axis_pos < head {
+                    axis_pos / large
+                } else if self.base_block_len == 0 {
+                    0
+                } else {
+                    self.larger_blocks + (axis_pos - head) / self.base_block_len
+                }
+            }
+        }
+    }
+}
+
+/// A checked replacement for a digest's [`BlockLayout`].
+#[derive(Debug)]
+pub(crate) struct LayoutChange {
+    pub layout: BlockLayout,
+    /// `new_to_old[new_block] = old_block`. `None` means the compact order is unchanged.
+    pub new_to_old: Option<Vec<usize>>,
+}
+
+fn incompatible(operation: &'static str, reason: &'static str) -> Error {
+    Error::IncompatibleLayout { operation, reason }
 }
 
 #[cfg(test)]
@@ -275,7 +408,9 @@ mod tests {
                 block / (layout.inner * layout.blocks_axis)
             );
             for k in 0..len {
-                visits[start + k * stride] += 1;
+                let flat = start + k * stride;
+                visits[flat] += 1;
+                assert_eq!(layout.block_index(flat), block);
             }
         }
         assert!(visits.iter().all(|&count| count == 1));
@@ -377,5 +512,98 @@ mod tests {
         for block in 0..layout.block_count() {
             assert_eq!(layout.span(block), (block, 1, 1));
         }
+    }
+
+    #[test]
+    fn elementwise_retarget_keeps_block_order() {
+        let layout = BlockLayout::new(&[2, 3], BlockConfig::Elementwise).unwrap();
+        let change = layout
+            .retarget(&[3, 2], BlockConfig::Elementwise, "reshape")
+            .unwrap();
+        assert!(change.new_to_old.is_none());
+        assert_eq!(change.layout.input_shape(), &[3, 2]);
+        assert_eq!(change.layout.block_count(), 6);
+
+        let scalar = BlockLayout::new(&[], BlockConfig::Elementwise).unwrap();
+        let widened = scalar
+            .retarget(&[1, 1], BlockConfig::Elementwise, "reshape")
+            .unwrap();
+        assert!(widened.new_to_old.is_none());
+        assert_eq!(widened.layout.input_numel(), 1);
+
+        let empty = BlockLayout::new(&[0, 4], BlockConfig::Elementwise).unwrap();
+        let still_empty = empty
+            .retarget(&[2, 0, 3], BlockConfig::Elementwise, "reshape")
+            .unwrap();
+        assert!(still_empty.new_to_old.is_none());
+        assert_eq!(still_empty.layout.block_count(), 0);
+    }
+
+    #[test]
+    fn compatible_blocked_retarget_preserves_spans() {
+        let layout = BlockLayout::new(&[2, 8], BlockConfig::block_size(4, -1)).unwrap();
+        let change = layout
+            .retarget(&[4, 4], BlockConfig::block_size(4, 1), "reshape")
+            .unwrap();
+        assert!(change.new_to_old.is_none());
+        assert!(layout.spans_equal(&change.layout));
+
+        let flat = layout
+            .retarget(&[16], BlockConfig::block_size(4, 0), "remap")
+            .unwrap();
+        assert!(flat.new_to_old.is_none());
+        assert!(layout.spans_equal(&flat.layout));
+    }
+
+    #[test]
+    fn retarget_rejects_split_merge_and_element_count_changes() {
+        let pooled = BlockLayout::new(&[2, 8], BlockConfig::block_size(4, -1)).unwrap();
+        let split = pooled
+            .retarget(&[8, 2], BlockConfig::block_size(4, 1), "reshape")
+            .unwrap_err();
+        assert_eq!(
+            split.to_string(),
+            "cannot reshape this digest: it would split a pooled block"
+        );
+
+        let crossed = pooled
+            .retarget(&[2, 8], BlockConfig::block_size(2, 0), "remap")
+            .unwrap_err();
+        assert!(crossed.to_string().contains("split a pooled block"));
+
+        // Same block count, but the pools run along the other axis.
+        let rows = BlockLayout::new(&[2, 4], BlockConfig::block_size(2, 0)).unwrap();
+        let columns = rows
+            .retarget(&[2, 4], BlockConfig::block_size(2, 1), "remap")
+            .unwrap_err();
+        assert!(columns.to_string().contains("split a pooled block"));
+
+        let elementwise = BlockLayout::new(&[8], BlockConfig::Elementwise).unwrap();
+        let merge = elementwise
+            .retarget(&[8], BlockConfig::block_size(4, 0), "remap")
+            .unwrap_err();
+        assert_eq!(
+            merge.to_string(),
+            "cannot remap this digest: it would merge distinct blocks"
+        );
+
+        let count = elementwise
+            .retarget(&[4], BlockConfig::Elementwise, "reshape")
+            .unwrap_err();
+        assert_eq!(
+            count.to_string(),
+            "cannot reshape this digest: element count must be unchanged"
+        );
+    }
+
+    #[test]
+    fn block_index_round_trips_the_short_final_group() {
+        let layout = BlockLayout::new(&[1, 5], BlockConfig::block_size(2, 1)).unwrap();
+        assert_partition(&layout);
+        let balanced = BlockLayout::new(&[1, 5], BlockConfig::blocks_per_axis(2, 1)).unwrap();
+        assert_partition(&balanced);
+        let huge = BlockLayout::new(&[usize::MAX], BlockConfig::block_size(usize::MAX - 1, 0)).unwrap();
+        assert_eq!(huge.block_index(0), 0);
+        assert_eq!(huge.block_index(usize::MAX - 1), 1);
     }
 }

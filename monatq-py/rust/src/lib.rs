@@ -15,7 +15,9 @@ fn to_py_err(error: monatq::Error) -> PyErr {
     match error {
         monatq::Error::Unsupported { .. } => PyNotImplementedError::new_err(error.to_string()),
         monatq::Error::IndexOutOfBounds { .. } => PyIndexError::new_err(error.to_string()),
-        monatq::Error::ShapeMismatch { .. } | monatq::Error::InvalidConfig { .. } => {
+        monatq::Error::ShapeMismatch { .. }
+        | monatq::Error::InvalidConfig { .. }
+        | monatq::Error::IncompatibleLayout { .. } => {
             PyValueError::new_err(error.to_string())
         }
         monatq::Error::InvalidSnapshot(_) => PyValueError::new_err(error.to_string()),
@@ -188,6 +190,12 @@ impl Inner {
     }
     fn block_config(&self) -> monatq::BlockConfig {
         dispatch!(self, d => d.block_config())
+    }
+    fn reshape(&mut self, shape: &[usize]) -> monatq::Result<()> {
+        dispatch!(self, d => d.reshape(shape))
+    }
+    fn remap(&mut self, shape: &[usize], blocks: monatq::BlockConfig) -> monatq::Result<()> {
+        dispatch!(self, d => d.remap(shape, blocks))
     }
     fn dtype(&self) -> &'static str {
         match self {
@@ -496,6 +504,31 @@ impl PyTensorDigest {
     #[getter]
     fn block_config(&self) -> Option<PyBlockConfig> {
         PyBlockConfig::from_rust(self.inner.block_config())
+    }
+
+    /// Change the tensor shape accepted by `update`, keeping the current block grouping.
+    ///
+    /// The element count must stay the same. A blocked digest is updated only when every
+    /// pooled block still covers the same elements. On failure the digest is left unchanged.
+    fn reshape(&mut self, shape: Vec<usize>) -> PyResult<()> {
+        self.inner.reshape(&shape).map_err(to_py_err)
+    }
+
+    /// Change the tensor shape and the block grouping together.
+    ///
+    /// Omit `blocks` for elementwise tracking. A layout that would split a pooled block or
+    /// merge blocks that are still tracked separately is rejected and leaves the digest
+    /// unchanged.
+    #[pyo3(signature = (shape, blocks = None))]
+    fn remap(
+        &mut self,
+        shape: Vec<usize>,
+        blocks: Option<PyRef<'_, PyBlockConfig>>,
+    ) -> PyResult<()> {
+        let blocks = blocks
+            .map(|config| (*config).into_rust())
+            .unwrap_or(monatq::BlockConfig::Elementwise);
+        self.inner.remap(&shape, blocks).map_err(to_py_err)
     }
 
     fn update(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<()> {

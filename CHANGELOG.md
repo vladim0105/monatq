@@ -2,6 +2,12 @@
 
 Notable changes to `monatq` are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Reshape and remap.** `TensorDigest::reshape` changes the shape accepted by `update` without flushing or recompressing. `remap` changes that shape and the block grouping together. Elementwise digests accept any shape with the same element count. A blocked digest moves only when every block still covers the same elements. Splitting a pooled block, or merging blocks that are still separate, returns `Error::IncompatibleLayout` and leaves the digest unchanged. Pending rows stay in flat element order. Python: `digest.reshape(shape)` and `digest.remap(shape, blocks=None)`, both raising `ValueError`.
+
 ## [0.4.1]
 
 ### Changed

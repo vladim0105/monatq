@@ -278,3 +278,53 @@ class TestSnapshots:
     def test_corrupt_bytes_raise_value_error(self):
         with pytest.raises(ValueError):
             TensorDigest.from_bytes(b"not a snapshot")
+
+
+class TestReshape:
+    @pytest.mark.parametrize("kernel", ["rankknot", "tdigest"])
+    def test_reshape_and_remap_keep_values_and_reject_splits(self, kernel):
+        digest = TensorDigest([2, 3], kernel=kernel, buffer_capacity=8)
+        row = np.arange(6, dtype=np.float32)
+        digest.update(row)
+        digest.reshape([3, 2])
+        assert digest.shape == [3, 2]
+        assert digest.block_config is None
+        assert digest.quantile(0.0) == pytest.approx(list(row))
+        assert digest.quantile(1.0) == pytest.approx(list(row))
+        with pytest.raises(ValueError, match="element count"):
+            digest.reshape([4])
+        assert digest.shape == [3, 2]
+        digest.remap([6])
+        assert digest.shape == [6]
+        assert digest.block_count == 6
+
+        pooled = TensorDigest(
+            [2, 8],
+            kernel=kernel,
+            buffer_capacity=8,
+            blocks=BlockConfig(block_size=4),
+        )
+        pooled.update(np.arange(16, dtype=np.float32))
+        pooled.reshape([4, 4])
+        assert pooled.shape == [4, 4]
+        assert pooled.block_shape == [4, 1]
+        assert pooled.block_config == BlockConfig(block_size=4, axis=1)
+        assert pooled.quantile(1.0) == pytest.approx([3.0, 7.0, 11.0, 15.0])
+        with pytest.raises(ValueError, match="split"):
+            pooled.reshape([8, 2])
+        assert pooled.shape == [4, 4]
+        assert pooled.quantile(1.0) == pytest.approx([3.0, 7.0, 11.0, 15.0])
+        with pytest.raises(ValueError, match="block axis"):
+            pooled.reshape([16])
+        assert pooled.block_shape == [4, 1]
+        pooled.remap([16], BlockConfig(block_size=4, axis=0))
+        assert pooled.shape == [16]
+        assert pooled.block_config == BlockConfig(block_size=4, axis=0)
+        assert pooled.quantile(0.0) == pytest.approx([0.0, 4.0, 8.0, 12.0])
+
+        separate = TensorDigest([8], kernel=kernel)
+        separate.update(np.arange(8, dtype=np.float32))
+        with pytest.raises(ValueError, match="merge"):
+            separate.remap([8], BlockConfig(block_size=4))
+        assert separate.shape == [8]
+        assert separate.block_count == 8

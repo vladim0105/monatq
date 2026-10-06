@@ -15,6 +15,8 @@ pub(crate) trait StorageOperations<T: TensorValue>: Sized {
     fn block_shape(&self) -> &[usize];
     fn block_count(&self) -> usize;
     fn block_config(&self) -> BlockConfig;
+    fn reshape(&mut self, shape: &[usize]) -> Result<()>;
+    fn remap(&mut self, shape: &[usize], blocks: BlockConfig) -> Result<()>;
     fn total_weight(&self, idx: usize) -> Result<u32>;
     fn update(&mut self, data: &[T]) -> Result<()>;
     fn flush(&mut self);
@@ -139,6 +141,42 @@ impl<T: TensorValue, K: DigestKernel<T>> TensorDigest<T, K> {
     /// requested; the effective number of groups along the axis is `block_shape()[axis]`.
     pub fn block_config(&self) -> BlockConfig {
         self.storage.block_config()
+    }
+
+    /// Change the tensor shape accepted by [`Self::update`], keeping the current block grouping.
+    ///
+    /// Each block's full summary stays where it is, and observations still waiting in the
+    /// input buffer stay with the elements they already describe. Nothing is flushed or
+    /// recompressed. On failure the digest is left unchanged.
+    ///
+    /// `shape` must have the same number of elements. An elementwise digest accepts any such
+    /// shape. A blocked digest is updated only when every pooled block still covers exactly
+    /// the same elements; a layout that would split a pooled block is rejected because those
+    /// observations can no longer be separated. See [`Self::remap`] to change the grouping as
+    /// well.
+    ///
+    /// ```
+    /// use monatq::TensorDigest;
+    ///
+    /// let mut digest = TensorDigest::<f32>::new(&[2, 3]);
+    /// digest.update(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    /// digest.reshape(&[3, 2]).unwrap();
+    /// assert_eq!(digest.shape(), &[3, 2]);
+    /// assert_eq!(digest.quantile(1.0), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    /// ```
+    pub fn reshape(&mut self, shape: &[usize]) -> Result<()> {
+        self.storage.reshape(shape)
+    }
+
+    /// Change the tensor shape and the block grouping together.
+    ///
+    /// Preservation rules match [`Self::reshape`]: full per-block state and pending
+    /// observations both survive, and a rejected call does not modify the digest.
+    /// Elementwise digests accept any elementwise target with the same element count.
+    /// A target that would split a pooled block, or combine blocks that are still tracked
+    /// separately, is rejected with [`crate::Error::IncompatibleLayout`].
+    pub fn remap(&mut self, shape: &[usize], blocks: BlockConfig) -> Result<()> {
+        self.storage.remap(shape, blocks)
     }
 
     /// Total flushed observation weight for an atomic block.

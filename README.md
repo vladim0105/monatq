@@ -110,6 +110,21 @@ let digest = TensorDigest::<f32>::with_blocks(&[2, 5], BlockConfig::blocks_per_a
 assert_eq!(digest.block_config(), BlockConfig::Count { count: 5, axis: 1 });
 ```
 
+`reshape` keeps the current grouping and changes only the tensor shape `update` accepts.
+`remap` changes the shape and the grouping together. Both leave every block's summary and
+any still-buffered rows where they are; nothing is flushed or recompressed. An elementwise
+digest accepts any shape with the same element count. A blocked digest moves only when the
+new layout is the same partition of flat indices. A layout that would split a pooled block
+or merge blocks that are still separate returns `Error::IncompatibleLayout` and leaves the
+digest unchanged. A target whose grouping axis does not exist is `Error::InvalidConfig`.
+
+```rust
+let mut digest = TensorDigest::<f32>::new(&[2, 3]);
+digest.update(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])?;
+digest.reshape(&[6])?;
+digest.remap(&[3, 2], BlockConfig::Elementwise)?;
+```
+
 The snapshot format now records the grouping mode. Snapshots written by monatq 0.3.0 or
 earlier must be regenerated; incompatible versions are rejected explicitly.
 
@@ -209,7 +224,7 @@ match digest.update(&[1.0, 2.0]) {
 
 `Error` also distinguishes `InvalidSnapshot` (the bytes were read fine but do not
 describe a usable digest) from `Io` (the file or device failed), and carries
-`ShapeMismatch`, `IndexOutOfBounds`, and `InvalidConfig`.
+`ShapeMismatch`, `IndexOutOfBounds`, `InvalidConfig`, and `IncompatibleLayout`.
 
 NaN input is a documented precondition rather than a checked one: `update` does not
 validate it, and a later flush will panic.

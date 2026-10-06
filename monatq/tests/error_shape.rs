@@ -29,6 +29,23 @@ fn malformed_bytes_are_snapshot_errors_not_io_errors() {
 }
 
 #[test]
+fn incompatible_layout_names_the_refused_operation() {
+    let error = Error::IncompatibleLayout {
+        operation: "reshape",
+        reason: "element count must be unchanged",
+    };
+    assert_eq!(
+        error.to_string(),
+        "cannot reshape this digest: element count must be unchanged"
+    );
+    assert!(error.is_incompatible_layout());
+    assert!(!error.is_unsupported());
+    assert!(!error.is_invalid_snapshot());
+    let converted: std::io::Error = error.into();
+    assert_eq!(converted.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
 fn error_messages_name_the_kernel_and_the_operation() {
     let error = Error::Unsupported {
         kernel: "TestKernel",

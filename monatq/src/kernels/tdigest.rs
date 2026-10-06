@@ -552,6 +552,18 @@ impl<T: TensorValue> StorageOperations<T> for TDigestStorage<T> {
     fn block_config(&self) -> crate::BlockConfig {
         self.layout.config()
     }
+    fn reshape(&mut self, shape: &[usize]) -> crate::Result<()> {
+        let change = self
+            .layout
+            .retarget(shape, self.layout.config(), "reshape")?;
+        self.apply_layout(change);
+        Ok(())
+    }
+    fn remap(&mut self, shape: &[usize], blocks: crate::BlockConfig) -> crate::Result<()> {
+        let change = self.layout.retarget(shape, blocks, "remap")?;
+        self.apply_layout(change);
+        Ok(())
+    }
     fn total_weight(&self, idx: usize) -> crate::Result<u32> {
         crate::error::check_index(idx, self.layout.block_count())?;
         Ok(self.total_weight(idx))
@@ -734,6 +746,44 @@ impl<T: TensorValue> TDigestStorage<T> {
 
         filtered
     }
+
+    /// Move centroid slots when the compact block order changes. Pending rows stay in flat
+    /// element order; a legal retarget does not split the elements a block already owns.
+    fn apply_layout(&mut self, change: crate::block::LayoutChange) {
+        if let Some(order) = &change.new_to_old {
+            let chunk = self.max_centroids;
+            let means = permute_chunks(&self.centroids_means, chunk, order);
+            let weights = permute_chunks(&self.centroids_weights, chunk, order);
+            let n_centroids = permute_blocks(&self.n_centroids, order);
+            let total_weights = permute_blocks(&self.total_weights, order);
+            let mins = permute_blocks(&self.mins, order);
+            let maxs = permute_blocks(&self.maxs, order);
+            self.centroids_means = means;
+            self.centroids_weights = weights;
+            self.n_centroids = n_centroids;
+            self.total_weights = total_weights;
+            self.mins = mins;
+            self.maxs = maxs;
+        }
+        debug_assert_eq!(
+            change.layout.buffer_rows(self.buffer_capacity),
+            self.buffer_rows
+        );
+        self.layout = change.layout;
+    }
+}
+
+fn permute_blocks<T: Copy>(items: &[T], new_to_old: &[usize]) -> Vec<T> {
+    new_to_old.iter().map(|&old| items[old]).collect()
+}
+
+fn permute_chunks<T: Copy>(items: &[T], chunk: usize, new_to_old: &[usize]) -> Vec<T> {
+    let mut out = Vec::with_capacity(items.len());
+    for &old in new_to_old {
+        let start = old * chunk;
+        out.extend_from_slice(&items[start..start + chunk]);
+    }
+    out
 }
 
 fn analyze_element(
@@ -1191,5 +1241,88 @@ mod tests {
             "ramp median {:.4} not near 0.5",
             q50[2]
         );
+    }
+
+    #[test]
+    fn reshape_keeps_pending_rows_until_a_later_flush() {
+        let mut storage = TDigestStorage::<f32>::with_layout(
+            BlockLayout::default_for(&[2, 3]),
+            20,
+            8,
+        );
+        let sample = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        storage.update(&sample);
+        assert_eq!(storage.n_buffered, 1);
+        assert!(storage.total_weights.iter().all(|&weight| weight == 0));
+        let pending = storage.row_buffer.clone();
+
+        StorageOperations::reshape(&mut storage, &[3, 2]).unwrap();
+        assert_eq!(storage.layout.input_shape(), &[3, 2]);
+        assert_eq!(storage.n_buffered, 1);
+        assert_eq!(storage.row_buffer, pending);
+        assert!(storage.total_weights.iter().all(|&weight| weight == 0));
+
+        let mut blocked = TDigestStorage::<f32>::with_layout(
+            BlockLayout::new(&[2, 8], crate::BlockConfig::block_size(4, -1)).unwrap(),
+            20,
+            8,
+        );
+        let pooled: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        blocked.update(&pooled);
+        assert_eq!(blocked.n_buffered, 1);
+        let pooled_pending = blocked.row_buffer.clone();
+        let weights = blocked.total_weights.clone();
+        StorageOperations::reshape(&mut blocked, &[4, 4]).unwrap();
+        assert_eq!(blocked.layout.input_shape(), &[4, 4]);
+        assert_eq!(blocked.layout.shape(), &[4, 1]);
+        assert_eq!(blocked.n_buffered, 1);
+        assert_eq!(blocked.row_buffer, pooled_pending);
+        assert_eq!(blocked.total_weights, weights);
+
+        let error = StorageOperations::reshape(&mut blocked, &[8, 2]).unwrap_err();
+        assert!(error.is_incompatible_layout());
+        assert_eq!(blocked.layout.input_shape(), &[4, 4]);
+        assert_eq!(blocked.n_buffered, 1);
+        assert_eq!(blocked.row_buffer, pooled_pending);
+        assert_eq!(blocked.total_weights, weights);
+    }
+
+    #[test]
+    fn apply_layout_permutes_centroid_chunks_without_moving_pending_rows() {
+        let mut storage =
+            TDigestStorage::<f32>::with_layout(BlockLayout::default_for(&[4]), 10, 4);
+        storage.update(&[1.0, 2.0, 3.0, 4.0]);
+        let pending = storage.row_buffer.clone();
+        let buffered = storage.n_buffered;
+        let chunk = storage.max_centroids;
+        for block in 0..4 {
+            storage.centroids_means[block * chunk] = block as f32;
+            storage.centroids_weights[block * chunk] = block as u32 + 1;
+            storage.n_centroids[block] = 1;
+            storage.total_weights[block] = block as u32 + 1;
+            storage.mins[block] = block as f32;
+            storage.maxs[block] = block as f32 + 10.0;
+        }
+        // Current one-axis layouts keep identity order. This installs a swapped order directly
+        // so a future retarget that does permute still leaves the flat row buffer alone.
+        storage.apply_layout(crate::block::LayoutChange {
+            layout: BlockLayout::default_for(&[2, 2]),
+            new_to_old: Some(vec![3, 1, 2, 0]),
+        });
+        assert_eq!(storage.n_buffered, buffered);
+        assert_eq!(storage.row_buffer, pending);
+        assert_eq!(storage.total_weights, vec![4, 2, 3, 1]);
+        assert_eq!(storage.n_centroids, vec![1, 1, 1, 1]);
+        assert_eq!(storage.mins, vec![3.0, 1.0, 2.0, 0.0]);
+        assert_eq!(storage.maxs, vec![13.0, 11.0, 12.0, 10.0]);
+        assert_eq!(storage.centroids_means[0], 3.0);
+        assert_eq!(storage.centroids_weights[0], 4);
+        assert_eq!(storage.centroids_means[chunk], 1.0);
+        assert_eq!(storage.centroids_weights[chunk], 2);
+        assert_eq!(storage.centroids_means[2 * chunk], 2.0);
+        assert_eq!(storage.centroids_weights[2 * chunk], 3);
+        assert_eq!(storage.centroids_means[3 * chunk], 0.0);
+        assert_eq!(storage.centroids_weights[3 * chunk], 1);
+        assert_eq!(storage.layout.input_shape(), &[2, 2]);
     }
 }
